@@ -8,8 +8,6 @@ use x11rb::{
     protocol::xproto::ConnectionExt,
 };
 
-////
-
 struct OxWM<Conn> {
     conn: Conn,
     screen: usize,
@@ -19,11 +17,11 @@ struct OxWM<Conn> {
 impl<Conn> OxWM<Conn> {
     fn new(conn: Conn, screen: usize) -> OxWM<Conn> {
         // Unfortunately, we can't acquire a connection here; we have to accept
-        // one as an argument. Why? Because x11rb::connect() returns an
-        // existential Connection, but Conn is universally quantified. In order
-        // to acquire a connection here, we'd need to be able to put it in an
-        // impl block like impl OxWM<typeof(x11rb::connect().1)>, which isn't
-        // even close to valid Rust.
+        // one as an argument. Why? Because `x11rb::connect` returns an
+        // existential `Connection`, but `Conn` is universally quantified. In
+        // order to acquire a connection here, we'd need to be able to do
+        // something like `impl OxWM<typeof(x11rb::connect().1)> {...}`, which
+        // isn't even close to valid Rust.
         OxWM {
             conn: conn,
             screen: screen,
@@ -38,10 +36,11 @@ impl<Conn> OxWM<Conn> {
         let setup = self.conn.setup();
         let screen = &setup.roots[self.screen];
         let root = screen.root;
-        // Try to select SubstructureRedirectMask the root window. Only one
-        // client---the WM---can do so; if we fail here, we assume that another
-        // WM is running and just exit.
-        log::debug!("Selecting for SubstructureRedirectMask on the root window.");
+        // Try to redirect structure events from children of the root window.
+        // Only one client---which must be the WM, essentially by
+        // definition---can do this; so if we fail here, another WM is probably
+        // running.
+        log::debug!("Selecting SUBSTRUCTURE_REDIRECT on the root window.");
         xproto::change_window_attributes(
             &self.conn,
             root,
@@ -49,7 +48,9 @@ impl<Conn> OxWM<Conn> {
                 .event_mask(xproto::EventMask::SUBSTRUCTURE_REDIRECT),
         )?
         .check()?;
+        // Adopt already-existing windows.
         self.adopt_children(root)?;
+        // Core event loop.
         loop {
             match self.conn.wait_for_event()? {
                 ConfigureRequest(ev) => {
@@ -62,8 +63,8 @@ impl<Conn> OxWM<Conn> {
                     ()
                 }
                 MapRequest(ev) => {}
-                DestroyNotify(ev) => {}
                 _ => (),
+                DestroyNotify(ev) => {}
             }
         }
         Ok(())
@@ -86,6 +87,8 @@ impl<Conn> OxWM<Conn> {
         Iter: Iterator<Item = xproto::Window>,
     {
         let conn = &self.conn;
+        // Request information about all the children of the root window. We
+        // send out all the requests before listening for any replies.
         let cookies = windows
             .map(|window| {
                 (
@@ -106,8 +109,6 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 }
-
-////
 
 struct Client {
     window: xproto::Window,
@@ -143,8 +144,6 @@ impl Clients {
         })
     }
 }
-
-////
 
 fn run_wm() -> Result<(), Box<dyn Error>> {
     let (conn, screen) = x11rb::connect(None)?;
