@@ -52,7 +52,7 @@ impl<Conn> OxWM<Conn> {
         self.adopt_children(root)?;
         loop {
             match self.conn.wait_for_event()? {
-                | ConfigureRequest(ev) => {
+                ConfigureRequest(ev) => {
                     self.conn
                         .configure_window(
                             ev.window,
@@ -61,9 +61,9 @@ impl<Conn> OxWM<Conn> {
                         .check()?;
                     ()
                 }
-                | MapRequest(ev) => {}
-                | DestroyNotify(ev) => {}
-                | _ => (),
+                MapRequest(ev) => {}
+                DestroyNotify(ev) => {}
+                _ => (),
             }
         }
         Ok(())
