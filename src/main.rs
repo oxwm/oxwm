@@ -52,7 +52,9 @@ impl<Conn> OxWM<Conn> {
         self.adopt_children(root)?;
         // Core event loop.
         loop {
-            match self.conn.wait_for_event()? {
+            let ev = self.conn.wait_for_event()?;
+            log::debug!("{:?}", ev);
+            match ev {
                 ConfigureRequest(ev) => {
                     self.conn
                         .configure_window(
@@ -60,11 +62,13 @@ impl<Conn> OxWM<Conn> {
                             &xproto::ConfigureWindowAux::from_configure_request(&ev),
                         )?
                         .check()?;
-                    ()
                 }
-                MapRequest(ev) => {}
-                _ => (),
-                DestroyNotify(ev) => {}
+                MapRequest(ev) => {
+                    xproto::map_window(&self.conn, ev.window)?.check()?;
+                }
+                _ => {
+                    log::warn!("Unhandled event!");
+                }
             }
         }
         Ok(())
