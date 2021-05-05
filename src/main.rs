@@ -1,5 +1,6 @@
 use log;
 use std::error::Error;
+use std::process::Command;
 use std::result::Result;
 use x11rb::protocol::xproto;
 use x11rb::protocol::Event::*;
@@ -8,10 +9,14 @@ use x11rb::{
     protocol::xproto::ConnectionExt,
 };
 
+const TERM: &str = "xterm";
+const MOD: xproto::ModMask = xproto::ModMask::M4;
+
 struct OxWM<Conn> {
     conn: Conn,
     screen: usize,
     clients: Clients,
+    keep_going: bool,
 }
 
 impl<Conn> OxWM<Conn> {
@@ -26,10 +31,11 @@ impl<Conn> OxWM<Conn> {
             conn: conn,
             screen: screen,
             clients: Clients::new(),
+            keep_going: true,
         }
     }
 
-    fn run(&mut self) -> Result<(), Box<dyn Error>>
+    fn run(mut self) -> Result<(), Box<dyn Error>>
     where
         Conn: Connection,
     {
@@ -48,10 +54,29 @@ impl<Conn> OxWM<Conn> {
                 .event_mask(xproto::EventMask::SUBSTRUCTURE_REDIRECT),
         )?
         .check()?;
+        // Start a terminal.
+        if let Err(err) = Command::new(TERM).spawn() {
+            log::error!("Unable to start terminal: {:}", err);
+        }
         // Adopt already-existing windows.
         self.adopt_children(root)?;
+        // Initialize the keysym mapping.
+        let keysyms =
+            xproto::get_keyboard_mapping(&self.conn, xproto::Keycode::MIN, u8::MAX)?.reply()?;
+        // Get a passive grab on Super+keycode 24 (happens to be Q on my
+        // keybard; don't worry, customizable keybinds are the next goal).
+        xproto::grab_key(
+            &self.conn,
+            false,
+            root,
+            MOD,
+            24,
+            xproto::GrabMode::ASYNC,
+            xproto::GrabMode::ASYNC,
+        )?
+        .check()?;
         // Core event loop.
-        loop {
+        while self.keep_going {
             let ev = self.conn.wait_for_event()?;
             log::debug!("{:?}", ev);
             match ev {
@@ -63,9 +88,13 @@ impl<Conn> OxWM<Conn> {
                         )?
                         .check()?;
                 }
+                KeyPress(ev) => {
+                    break;
+                }
                 MapRequest(ev) => {
                     xproto::map_window(&self.conn, ev.window)?.check()?;
                 }
+                MappingNotify(_) => (),
                 _ => {
                     log::warn!("Unhandled event!");
                 }
