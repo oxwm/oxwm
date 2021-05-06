@@ -14,41 +14,39 @@ const MOD: xproto::ModMask = xproto::ModMask::M4;
 
 struct OxWM<Conn> {
     conn: Conn,
-    screen: usize,
+    screen: xproto::Screen,
     clients: Clients,
     keep_going: bool,
 }
 
 impl<Conn> OxWM<Conn> {
-    fn new(conn: Conn, screen: usize) -> OxWM<Conn> {
+    fn new(conn: Conn, screen: usize) -> Result<OxWM<Conn>, Box<dyn Error>>
+    where
+        Conn: Connection,
+    {
         // Unfortunately, we can't acquire a connection here; we have to accept
         // one as an argument. Why? Because `x11rb::connect` returns an
         // existential `Connection`, but `Conn` is universally quantified. In
         // order to acquire a connection here, we'd need to be able to do
         // something like `impl OxWM<typeof(x11rb::connect().1)> {...}`, which
         // isn't even close to valid Rust.
-        OxWM {
+        let setup = conn.setup();
+        let screen = setup.roots[screen].clone();
+        let root = screen.root;
+        let mut ret = OxWM {
             conn: conn,
             screen: screen,
             clients: Clients::new(),
             keep_going: true,
-        }
-    }
+        };
 
-    fn run(mut self) -> Result<(), Box<dyn Error>>
-    where
-        Conn: Connection,
-    {
-        let setup = self.conn.setup();
-        let screen = &setup.roots[self.screen];
-        let root = screen.root;
         // Try to redirect structure events from children of the root window.
         // Only one client---which must be the WM, essentially by
         // definition---can do this; so if we fail here, another WM is probably
         // running.
         log::debug!("Selecting SUBSTRUCTURE_REDIRECT on the root window.");
         xproto::change_window_attributes(
-            &self.conn,
+            &ret.conn,
             root,
             &xproto::ChangeWindowAttributesAux::new()
                 .event_mask(xproto::EventMask::SUBSTRUCTURE_REDIRECT),
@@ -59,14 +57,14 @@ impl<Conn> OxWM<Conn> {
             log::error!("Unable to start terminal: {:}", err);
         }
         // Adopt already-existing windows.
-        self.adopt_children(root)?;
+        ret.adopt_children(root)?;
         // Initialize the keysym mapping.
         let keysyms =
-            xproto::get_keyboard_mapping(&self.conn, xproto::Keycode::MIN, u8::MAX)?.reply()?;
+            xproto::get_keyboard_mapping(&ret.conn, xproto::Keycode::MIN, u8::MAX)?.reply()?;
         // Get a passive grab on Super+keycode 24 (happens to be Q on my
         // keybard; don't worry, customizable keybinds are the next goal).
         xproto::grab_key(
-            &self.conn,
+            &ret.conn,
             false,
             root,
             MOD,
@@ -75,6 +73,15 @@ impl<Conn> OxWM<Conn> {
             xproto::GrabMode::ASYNC,
         )?
         .check()?;
+        Ok(ret)
+    }
+
+    /// Run the WM. Note that this consumes the OxWM object: in particular, once
+    /// this procedure returns, the connection to the X server is gone.
+    fn run(mut self) -> Result<(), Box<dyn Error>>
+    where
+        Conn: Connection,
+    {
         // Core event loop.
         while self.keep_going {
             let ev = self.conn.wait_for_event()?;
@@ -181,7 +188,7 @@ impl Clients {
 fn run_wm() -> Result<(), Box<dyn Error>> {
     let (conn, screen) = x11rb::connect(None)?;
     log::info!("Connected on screen {}.", screen);
-    OxWM::new(conn, screen).run()
+    OxWM::new(conn, screen)?.run()
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
