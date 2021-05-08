@@ -1,3 +1,7 @@
+mod action;
+mod config;
+use config::Config;
+
 use log;
 use std::error::Error;
 use std::process::Command;
@@ -9,13 +13,13 @@ use x11rb::{
     protocol::xproto::ConnectionExt,
 };
 
-const TERM: &str = "xterm";
-const MOD: xproto::ModMask = xproto::ModMask::M4;
-
-struct OxWM<Conn> {
+pub struct OxWM<Conn> {
     conn: Conn,
     screen: xproto::Screen,
+    config: Config<Conn>,
     clients: Clients,
+    /// "Keep going" flag. If this is set to `false` at the start of the event
+    /// loop, the window manager will stop running.
     keep_going: bool,
 }
 
@@ -32,19 +36,21 @@ impl<Conn> OxWM<Conn> {
         // isn't even close to valid Rust.
         let setup = conn.setup();
         let screen = setup.roots[screen].clone();
-        let root = screen.root;
+        log::debug!("Loading config file.");
+        let config = Config::load()?;
         let mut ret = OxWM {
-            conn: conn,
-            screen: screen,
+            conn,
+            screen,
+            config,
             clients: Clients::new(),
             keep_going: true,
         };
-
         // Try to redirect structure events from children of the root window.
         // Only one client---which must be the WM, essentially by
         // definition---can do this; so if we fail here, another WM is probably
         // running.
         log::debug!("Selecting SUBSTRUCTURE_REDIRECT on the root window.");
+        let root = ret.screen.root;
         xproto::change_window_attributes(
             &ret.conn,
             root,
@@ -53,36 +59,42 @@ impl<Conn> OxWM<Conn> {
         )?
         .check()?;
         // Start a terminal.
-        if let Err(err) = Command::new(TERM).spawn() {
-            log::error!("Unable to start terminal: {:}", err);
+        for program in &ret.config.startup {
+            if let Err(err) = Command::new(program).spawn() {
+                log::error!("Unable to execute startup program `{}': {:}", program, err);
+            }
         }
         // Adopt already-existing windows.
         ret.adopt_children(root)?;
-        // Initialize the keysym mapping.
-        let keysyms =
-            xproto::get_keyboard_mapping(&ret.conn, xproto::Keycode::MIN, u8::MAX)?.reply()?;
-        // Get a passive grab on Super+keycode 24 (happens to be Q on my
-        // keybard; don't worry, customizable keybinds are the next goal).
-        xproto::grab_key(
-            &ret.conn,
-            false,
-            root,
-            MOD,
-            24,
-            xproto::GrabMode::ASYNC,
-            xproto::GrabMode::ASYNC,
-        )?
-        .check()?;
+        // Get a passive grab on all bound keycodes.
+        ret.config
+            .keybinds
+            .keys()
+            .map(|keycode| {
+                xproto::grab_key(
+                    &ret.conn,
+                    false,
+                    root,
+                    ret.config.mod_mask,
+                    *keycode,
+                    xproto::GrabMode::ASYNC,
+                    xproto::GrabMode::ASYNC,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|cookie| cookie?.check())
+            .collect::<Result<_, _>>()?;
+        // Done.
         Ok(ret)
     }
 
-    /// Run the WM. Note that this consumes the OxWM object: in particular, once
+    /// Run the WM. Note that this consumes the OxWM object: once
     /// this procedure returns, the connection to the X server is gone.
     fn run(mut self) -> Result<(), Box<dyn Error>>
     where
         Conn: Connection,
     {
-        // Core event loop.
         while self.keep_going {
             let ev = self.conn.wait_for_event()?;
             log::debug!("{:?}", ev);
@@ -96,7 +108,11 @@ impl<Conn> OxWM<Conn> {
                         .check()?;
                 }
                 KeyPress(ev) => {
-                    break;
+                    // We should only be listening for keycodes that are bound
+                    // in the keybinds map (anything else is a bug), so we can
+                    // call unwrap() with a clean conscience here.
+                    let action = self.config.keybinds.get(&ev.detail).unwrap();
+                    action(&mut self);
                 }
                 MapRequest(ev) => {
                     xproto::map_window(&self.conn, ev.window)?.check()?;
@@ -151,11 +167,11 @@ impl<Conn> OxWM<Conn> {
 }
 
 struct Client {
-    window: xproto::Window,
-    x: i16,
-    y: i16,
-    width: u16,
-    height: u16,
+    _window: xproto::Window,
+    _x: i16,
+    _y: i16,
+    _width: u16,
+    _height: u16,
 }
 
 struct Clients {
@@ -172,15 +188,15 @@ impl Clients {
     fn add_window(
         &mut self,
         window: xproto::Window,
-        attrs: xproto::GetWindowAttributesReply,
+        _attrs: xproto::GetWindowAttributesReply,
         geom: xproto::GetGeometryReply,
     ) {
         self.clients.push(Client {
-            window: window,
-            x: geom.x,
-            y: geom.y,
-            width: geom.width,
-            height: geom.height,
+            _window: window,
+            _x: geom.x,
+            _y: geom.y,
+            _width: geom.width,
+            _height: geom.height,
         })
     }
 }
