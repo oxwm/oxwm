@@ -1,7 +1,6 @@
 use crate::action;
 use crate::action::Action;
-
-use dirs;
+use crate::Result;
 
 use std::convert::TryFrom;
 use std::error::Error;
@@ -16,31 +15,31 @@ use thiserror::Error;
 
 use x11rb::protocol::xproto;
 
-/// Bespoke ModMask type so that we can have a `Deserialize` instance.
+/// Bespoke `ModMask` type so that we can have a `Deserialize` instance.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ModMask {
-    SHIFT,
-    LOCK,
-    CONTROL,
-    MOD1,
-    MOD2,
-    MOD3,
-    MOD4,
-    MOD5,
+    Shift,
+    Lock,
+    Control,
+    Mod1,
+    Mod2,
+    Mod3,
+    Mod4,
+    Mod5,
 }
 
-impl Into<xproto::ModMask> for ModMask {
-    fn into(self) -> xproto::ModMask {
-        match self {
-            Self::SHIFT => xproto::ModMask::SHIFT,
-            Self::LOCK => xproto::ModMask::LOCK,
-            Self::CONTROL => xproto::ModMask::CONTROL,
-            Self::MOD1 => xproto::ModMask::M1,
-            Self::MOD2 => xproto::ModMask::M2,
-            Self::MOD3 => xproto::ModMask::M3,
-            Self::MOD4 => xproto::ModMask::M4,
-            Self::MOD5 => xproto::ModMask::M5,
+impl From<ModMask> for xproto::ModMask {
+    fn from(m: ModMask) -> Self {
+        match m {
+            ModMask::Shift => xproto::ModMask::SHIFT,
+            ModMask::Lock => xproto::ModMask::LOCK,
+            ModMask::Control => xproto::ModMask::CONTROL,
+            ModMask::Mod1 => xproto::ModMask::M1,
+            ModMask::Mod2 => xproto::ModMask::M2,
+            ModMask::Mod3 => xproto::ModMask::M3,
+            ModMask::Mod4 => xproto::ModMask::M4,
+            ModMask::Mod5 => xproto::ModMask::M5,
         }
     }
 }
@@ -68,7 +67,7 @@ pub struct UnsupportedPlatformError;
 impl<Conn> Config<Conn> {
     /// Load the config file, or return a default config object if there is no
     /// config file.
-    pub fn load() -> Result<Self, Box<dyn Error>> {
+    pub fn load() -> Result<Self> {
         // TODO Will this work on Unix? We should probably make sure it works on
         // Unix.
         let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
@@ -78,13 +77,13 @@ impl<Conn> Config<Conn> {
     }
 
     /// Load a specified config file.
-    fn from_path(path: &Path) -> Result<Self, Box<dyn Error>> {
+    fn from_path(path: &Path) -> Result<Self> {
         let s = fs::read_to_string(path)?;
         Self::from_str(&s)
     }
 
     /// Parse a string directly.
-    fn from_str(s: &str) -> Result<Self, Box<dyn Error>> {
+    fn from_str(s: &str) -> Result<Self> {
         toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)
     }
 }
@@ -99,16 +98,16 @@ enum ConfigError {
 use ConfigError::*;
 
 impl<Conn> TryFrom<RawConfig> for Config<Conn> {
-    type Error = ConfigError;
-    fn try_from(raw: RawConfig) -> Result<Self, Self::Error> {
-        let startup = raw.startup.unwrap_or(Vec::new());
-        let mod_mask = raw.mod_mask.unwrap_or(ModMask::MOD4).into();
+    type Error = Box<dyn Error>;
+    fn try_from(raw: RawConfig) -> Result<Self> {
+        let startup = raw.startup.unwrap_or_default();
+        let mod_mask = raw.mod_mask.unwrap_or(ModMask::Mod4).into();
         let mut keybinds = HashMap::new();
-        for (keycode, action_name) in raw.keybinds.unwrap_or(HashMap::new()) {
-            let keycode = u8::from_str_radix(&keycode, 10).map_err(KeycodeError)?;
-            let action: Result<Action<Conn>, _> = match action_name.as_str() {
+        for (keycode, action_name) in raw.keybinds.unwrap_or_default() {
+            let keycode = keycode.parse::<u8>().map_err(KeycodeError)?;
+            let action: Result<Action<Conn>> = match action_name.as_str() {
                 "quit" => Ok(action::quit),
-                _ => Err(ActionError(action_name.clone())),
+                _ => Err(Box::new(ActionError(action_name.clone()))),
             };
             keybinds.insert(keycode, action?);
         }
@@ -121,7 +120,7 @@ impl<Conn> TryFrom<RawConfig> for Config<Conn> {
 }
 
 impl<'de, Conn> Deserialize<'de> for Config<Conn> {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
