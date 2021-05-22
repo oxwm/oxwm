@@ -1,3 +1,5 @@
+use oxwm::{Client, Clients};
+
 mod action;
 mod config;
 use config::Config;
@@ -5,11 +7,12 @@ mod util;
 use util::*;
 
 use std::error::Error;
-use std::{collections::HashMap, process::Command};
+use std::process::Command;
+
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt;
-use x11rb::protocol::Event::*;
-use x11rb::{connection::Connection, protocol::xproto::ConfigureWindowAux};
+use x11rb::protocol::Event;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
 /// anything with errors other than letting them bubble up to the user, so this
@@ -52,8 +55,11 @@ impl<Conn> OxWM<Conn> {
         // existential `Connection`, but `Conn` is universally quantified.
         let setup = conn.setup();
         let screen = setup.roots[screen].clone();
+        // Load the config file. (Do this first, since it's the most likely
+        // thing to fail in normal usage scenarios.)
         log::debug!("Loading config file.");
         let config = Config::load()?;
+        // Create the OxWM object.
         let mut ret = OxWM {
             conn,
             screen,
@@ -74,11 +80,15 @@ impl<Conn> OxWM<Conn> {
             .change_window_attributes(
                 root,
                 &xproto::ChangeWindowAttributesAux::new().event_mask(
-                    xproto::EventMask::SUBSTRUCTURE_NOTIFY
+                    xproto::EventMask::PROPERTY_CHANGE
+                        | xproto::EventMask::SUBSTRUCTURE_NOTIFY
                         | xproto::EventMask::SUBSTRUCTURE_REDIRECT,
                 ),
             )?
             .check()?;
+        // Adopt already-existing windows.
+        log::debug!("Adopting windows.");
+        ret.adopt_children(root)?;
         // Run startup programs.
         log::debug!("Running startup programs.");
         for program in &ret.config.startup {
@@ -86,9 +96,6 @@ impl<Conn> OxWM<Conn> {
                 log::warn!("Unable to execute startup program `{}': {:?}", program, err);
             }
         }
-        // Adopt already-existing windows.
-        log::debug!("Adopting windows.");
-        ret.adopt_children(root)?;
         // Get a passive grab on all bound keycodes.
         log::debug!("Grabbing bound keycodes.");
         ret.config
@@ -121,7 +128,7 @@ impl<Conn> OxWM<Conn> {
             let ev = self.conn.wait_for_event()?;
             log::debug!("{:?}", ev);
             match ev {
-                ButtonPress(ev) => {
+                Event::ButtonPress(ev) => {
                     // We're only listening for button presses on button 1 with
                     // the modifier key down, so if we get a ButtonPress event,
                     // we start dragging.
@@ -140,17 +147,17 @@ impl<Conn> OxWM<Conn> {
                         y: ev.event_y,
                     })
                 }
-                ButtonRelease(_) => match self.drag {
+                Event::ButtonRelease(_) => match self.drag {
                     None => log::error!("ButtonRelease event without a drag."),
                     Some(_) => self.drag = None,
                 },
-                CreateNotify(ev) => {
+                Event::CreateNotify(ev) => {
                     self.adopt_window(ev.window, ev.x, ev.y, ev.width, ev.height)?;
                 }
-                ConfigureNotify(ev) => self
+                Event::ConfigureNotify(ev) => self
                     .clients
                     .configure(ev.window, ev.x, ev.y, ev.width, ev.height),
-                ConfigureRequest(ev) => {
+                Event::ConfigureRequest(ev) => {
                     self.conn
                         .configure_window(
                             ev.window,
@@ -158,24 +165,27 @@ impl<Conn> OxWM<Conn> {
                         )?
                         .check()?;
                 }
-                DestroyNotify(ev) => self.clients.remove(ev.window),
-                KeyPress(ev) => {
+                Event::DestroyNotify(ev) => self.clients.remove(ev.window),
+                Event::KeyPress(ev) => {
                     // We're only listening for keycodes that are bound in the keybinds
                     // map (anything else is a bug), so we can call unwrap() with a
                     // clean conscience here.
                     let action = self.config.keybinds.get(&ev.detail).unwrap();
                     action(&mut self);
                 }
-                MapRequest(ev) => {
+                Event::MapRequest(ev) => {
                     self.conn.map_window(ev.window)?.check()?;
                 }
-                MotionNotify(ev) => match self.drag {
+                Event::MotionNotify(ev) => match self.drag {
                     None => log::error!("MotionNotify event without a drag."),
                     Some(ref drag) => {
                         let x = (ev.root_x - drag.x) as i32;
                         let y = (ev.root_y - drag.y) as i32;
                         self.conn
-                            .configure_window(drag.window, &ConfigureWindowAux::new().x(x).y(y))?
+                            .configure_window(
+                                drag.window,
+                                &xproto::ConfigureWindowAux::new().x(x).y(y),
+                            )?
                             .check()?;
                     }
                 },
@@ -210,6 +220,14 @@ impl<Conn> OxWM<Conn> {
                     window,
                     conn.get_window_attributes(window),
                     conn.get_geometry(window),
+                    conn.get_property(
+                        false,
+                        window,
+                        xproto::AtomEnum::WM_NAME,
+                        xproto::AtomEnum::STRING,
+                        0,
+                        0,
+                    ),
                     conn.grab_button(
                         false,
                         window,
@@ -228,14 +246,29 @@ impl<Conn> OxWM<Conn> {
                 )
             })
             .collect::<Vec<_>>();
-        for (window, cookie1, cookie2, cookie3) in cookies {
+        for (window, cookie1, cookie2, cookie3, cookie4) in cookies {
             // REVIEW Here is my reasoning for this code. If a cookie is an Err,
             // then there was a connection error, which is fatal. But if a
-            // reply/check is an Err, that just means that the window is gone.
-            match (cookie1?.reply(), cookie2?.reply(), cookie3?.check()) {
-                (Ok(_), Ok(geom), Ok(_)) => {
-                    self.clients
-                        .add(window, geom.x, geom.y, geom.width, geom.height)
+            // reply/check is an Err, that just means that the window is gone,
+            // which shouldn't be fatal.
+            match (
+                cookie1?.reply(),
+                cookie2?.reply(),
+                cookie3?.reply(),
+                cookie4?.check(),
+            ) {
+                (Ok(_), Ok(reply2), Ok(reply3), Ok(_)) => {
+                    let name = String::from_utf8(reply3.value).unwrap();
+                    self.clients.add(
+                        window,
+                        Client {
+                            x: reply2.x,
+                            y: reply2.y,
+                            width: reply2.width,
+                            height: reply2.height,
+                            name,
+                        },
+                    );
                 }
                 _ => log::warn!("Something went wrong while adopting window {}.", window),
             }
@@ -243,7 +276,7 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
-    /// Adopt a single window using information that is already at-hand.
+    /// Adopt a single window using some information that is already at hand.
     fn adopt_window(
         &mut self,
         window: xproto::Window,
@@ -256,7 +289,7 @@ impl<Conn> OxWM<Conn> {
         Conn: Connection,
     {
         log::debug!("Adopting window {}.", window);
-        let cookie = self.conn.grab_button(
+        let cookie1 = self.conn.grab_button(
             false,
             window,
             event_mask_to_u16(
@@ -271,76 +304,37 @@ impl<Conn> OxWM<Conn> {
             xproto::ButtonIndex::M1,
             self.config.mod_mask,
         );
-        match cookie?.check() {
-            Ok(_) => self.clients.add(window, x, y, width, height),
-            Err(err) => log::warn!("{:?}", err),
+        let cookie2 = self.conn.get_property(
+            false,
+            window,
+            xproto::AtomEnum::WM_NAME,
+            xproto::AtomEnum::STRING,
+            0,
+            0,
+        );
+        match (cookie1?.check(), cookie2?.reply()) {
+            (Ok(_), Ok(reply2)) => {
+                // TODO This is horribly wrong. X uses its own special text
+                // encoding, called "compound text". We actually need to write a
+                // decoder.
+                //
+                // I'm calling unwrap() here because we're already doing this
+                // the wrong way.
+                let name = String::from_utf8(reply2.value).unwrap();
+                self.clients.add(
+                    window,
+                    Client {
+                        x,
+                        y,
+                        width,
+                        height,
+                        name,
+                    },
+                );
+            }
+            _ => log::warn!("Something went wrong while adopting window {}.", window),
         }
         Ok(())
-    }
-}
-
-// We don't actually have any use for this data yet, but I assume we will at
-// some point...
-#[derive(Debug)]
-struct Client {
-    _x: i16,
-    _y: i16,
-    _width: u16,
-    _height: u16,
-}
-
-/// Local data about window states.
-struct Clients {
-    clients: HashMap<xproto::Window, Client>,
-}
-
-impl Clients {
-    fn new() -> Clients {
-        Clients {
-            clients: HashMap::new(),
-        }
-    }
-
-    fn add(&mut self, window: xproto::Window, x: i16, y: i16, width: u16, height: u16) {
-        log::debug!("Adding window {}.", window);
-        if self.clients.contains_key(&window) {
-            log::error!("Tried to add window {}, which is already managed.", window);
-            return;
-        }
-        self.clients.insert(
-            window,
-            Client {
-                _x: x,
-                _y: y,
-                _width: width,
-                _height: height,
-            },
-        );
-    }
-
-    /// Set local client data.
-    fn configure(&mut self, window: xproto::Window, x: i16, y: i16, width: u16, height: u16) {
-        log::debug!("Configuring window {}.", window);
-        match self.clients.get_mut(&window) {
-            None => log::error!("Tried to configure window {}, which isn't managed.", window),
-            Some(client) => {
-                client._x = x;
-                client._y = y;
-                client._width = width;
-                client._height = height;
-            }
-        }
-    }
-
-    /// Remove a window from the managed set.
-    fn remove(&mut self, window: xproto::Window) {
-        log::debug!("Removing window {}.", window);
-        if self.clients.remove(&window).is_none() {
-            // This is only a warning, because this situation can happen even if
-            // we don't do anything wrong: a window can be created and destroyed
-            // before we get the chance to manage it.
-            log::warn!("Tried to remove window {}, which isn't managed.", window);
-        }
     }
 }
 

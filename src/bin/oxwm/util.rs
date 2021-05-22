@@ -1,3 +1,5 @@
+//! Miscellaneous utilities for interfacing with X.
+
 use std::convert::TryInto;
 use x11rb::protocol::xproto;
 
