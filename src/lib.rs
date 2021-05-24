@@ -1,50 +1,36 @@
+use essrpc::essrpc;
+use essrpc::RPCError;
+
 use serde::Deserialize;
 use serde::Serialize;
+
 use std::collections::HashMap;
+use std::error::Error;
+
 use x11rb::protocol::xproto;
+
+/// Our most common error type. Policy right now is to use this unless there
+/// is a specific reason to use something else.
+pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 /// Local data about a top-level window.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Client {
+    /// Horizontal position.
     pub x: i16,
+    /// Vertical position.
     pub y: i16,
+    /// Horizontal extent.
     pub width: u16,
+    /// Vertical extent.
     pub height: u16,
+    /// Name. Right now, this is only obtained from the `WM_NAME` property. In
+    /// the future, it may also be obtained from `_NET_WM_NAME`.
     pub name: String,
 }
 
-/// Local data about top-level windows.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Clients {
-    clients: HashMap<xproto::Window, Client>,
-}
-
-impl Clients {
-    pub fn new() -> Clients {
-        Clients {
-            clients: HashMap::new(),
-        }
-    }
-
-    pub fn add(&mut self, window: xproto::Window, client: Client) {
-        if self.clients.contains_key(&window) {
-            return;
-        }
-        self.clients.insert(window, client);
-    }
-
-    /// Set local client data.
-    pub fn configure(&mut self, window: xproto::Window, x: i16, y: i16, width: u16, height: u16) {
-        if let Some(client) = self.clients.get_mut(&window) {
-            client.x = x;
-            client.y = y;
-            client.width = width;
-            client.height = height;
-        }
-    }
-
-    /// Remove a window from the managed set.
-    pub fn remove(&mut self, window: xproto::Window) {
-        self.clients.remove(&window);
-    }
+#[essrpc]
+pub trait OxWM {
+    // essrpc requires that the error type be convertible to RPCError
+    fn ls(&self) -> std::result::Result<HashMap<xproto::Window, Client>, RPCError>;
 }
