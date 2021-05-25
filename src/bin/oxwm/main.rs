@@ -1,4 +1,5 @@
 use oxwm::Client;
+use oxwm::OxWMState;
 
 // mod action;
 // mod config;
@@ -9,11 +10,14 @@ use util::*;
 
 use serde::Serialize;
 
-use std::collections::HashMap;
 use std::error::Error;
+use std::os::unix::net::UnixStream;
 use std::process::Command;
-use std::sync::mpsc;
 use std::thread;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
@@ -354,51 +358,91 @@ use x11rb::protocol::Event;
 // }
 //
 
-struct OxWM {
-    clients: Client,
+#[derive(Debug)]
+pub struct OxWM<Conn> {
+    conn: Conn,
+    state: Mutex<OxWMState>,
 }
 
 fn main() -> Result<()> {
     let (conn, screen) = x11rb::connect(None)?;
     let root = conn.setup().roots[screen].root;
-    let children = with_grabbed_server(&conn, || -> Result<Vec<u32>> {
+    // Grab the server during setup so that we can do everything atomically.
+    let clients = with_grabbed_server(&conn, || -> Result<HashMap<xproto::Window, Client>> {
         let children = conn.query_tree(root)?.reply()?.children;
+        let clients = children
+            .into_iter()
+            .map(|child| (child, conn.get_geometry(child)))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(child, cookie)| {
+                let reply = cookie?.reply()?;
+                Ok((
+                    child,
+                    Client {
+                        x: reply.x,
+                        y: reply.y,
+                        width: reply.width,
+                        height: reply.height,
+                    },
+                ))
+            })
+            // We've grabbed the server, so the only possible error is a
+            // connection error, which should invalidate the whole operation.
+            .collect::<Result<HashMap<_, _>>>()?;
         conn.change_window_attributes(
             root,
             &xproto::ChangeWindowAttributesAux::new()
                 .event_mask(xproto::EventMask::SUBSTRUCTURE_NOTIFY),
         )?
         .check()?;
-        Ok(children)
+        Ok(clients)
     })?;
 
-    let (conn_send, conn_recv) = mpsc::channel();
-    let (ev_send, ev_recv) = mpsc::channel();
-    thread::spawn(|| read_events(conn_recv, ev_send));
-    conn_send.send(conn)?;
+    let oxwm = Arc::new(OxWM {
+        conn,
+        state: Mutex::new(OxWMState { clients }),
+    });
+
+    // Spawn a thread to handle IPC.
+    let ipc_recv = unix_ipc::Receiver::connect("/tmp/oxwm")?;
+    let oxwm_clone = oxwm.clone();
+    thread::spawn(|| handle_ipc(oxwm_clone, ipc_recv));
+
+    match oxwm.conn.wait_for_event()? {
+        _ => todo!(),
+    }
     Ok(())
 }
 
-/// Perform the following sequence of events in a loop.
-///
-/// 1. Receive an X11 connection.
-/// 2. Wait for an X11 event.
-/// 3. Once an event occurs, send it, along with the connection.
-///
-/// Only stops when either remote is dropped.
-fn read_events<Conn>(
-    conn_recv: mpsc::Receiver<Conn>,
-    ev_send: mpsc::Sender<(
-        Conn,
-        std::result::Result<Event, x11rb::errors::ConnectionError>,
-    )>,
-) -> !
-where
-    Conn: Connection + Send,
-{
+// fn receive_events<Conn>(
+//     ev_send: crossbeam::channel::Sender<(
+//         Conn,
+//         std::result::Result<Event, x11rb::errors::ConnectionError>,
+//     )>,
+//     conn_recv: crossbeam::channel::Receiver<Conn>,
+// ) -> !
+// where
+//     Conn: Connection + Send,
+// {
+//     loop {
+//         let conn = conn_recv.recv().unwrap();
+//         let event = conn.wait_for_event();
+//         ev_send.send((conn, event)).unwrap();
+//     }
+// }
+
+fn handle_ipc<Conn>(
+    oxwm: Arc<OxWM<Conn>>,
+    ipc_recv: unix_ipc::Receiver<(unix_ipc::Sender<OxWMState>, Request)>,
+) -> ! {
     loop {
-        let conn = conn_recv.recv().unwrap();
-        let event = conn.wait_for_event();
-        ev_send.send((conn, event)).unwrap();
+        // TODO We probably shouldn't use unwrap() here; I think some other client
+        // application could send malformed messages, which would manifest as
+        // errors, which (as things stand) would crash the IPC thread.
+        let (ipc_send, req) = ipc_recv.recv().unwrap();
+        match req {
+            Request::Ls => {}
+        }
     }
 }

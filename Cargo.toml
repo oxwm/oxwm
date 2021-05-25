@@ -8,12 +8,13 @@ edition = "2018"
 name = "oxwm"
 
 [dependencies]
+crossbeam = "0.8.0"
 dirs = "3"
-essrpc = { version = "0.3.0", features = ["bincode_transport"] }
 log = "0.4.14"
 serde = { version = "1", features = ["derive"] }
 simple_logger = "1"
 structopt = "0.3.21"
 thiserror = "1"
 toml = "0.5.8"
+unix-ipc = { version = "0.2.0", features = ["serde"] }
 x11rb = "0.8.1"
