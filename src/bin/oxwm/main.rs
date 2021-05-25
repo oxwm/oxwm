@@ -1,5 +1,9 @@
-use oxwm::Client;
-use oxwm::OxWMState;
+use essrpc::transports::BincodeTransport;
+use essrpc::RPCError;
+use essrpc::RPCErrorKind;
+use essrpc::RPCServer;
+
+use oxwm::*;
 
 // mod action;
 // mod config;
@@ -10,19 +14,19 @@ use util::*;
 
 use serde::Serialize;
 
-use std::error::Error;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::UnixListener;
 use std::process::Command;
 use std::thread;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+use std::{error::Error, sync::MutexGuard};
 
-use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt;
 use x11rb::protocol::Event;
+use x11rb::{connection::Connection, protocol::xproto::ConfigureWindowAux};
 
 // pub struct OxWM<Conn> {
 //     /// The screen we're connected on.
@@ -364,6 +368,45 @@ pub struct OxWM<Conn> {
     state: Mutex<OxWMState>,
 }
 
+impl<Conn> Ox for OxWM<Conn>
+where
+    Conn: Connection,
+{
+    fn ls(&self) -> std::result::Result<OxWMState, essrpc::RPCError> {
+        Ok(self.state.lock().into_rpc_error()?.clone())
+    }
+
+    fn configure_window(
+        &self,
+        window: xproto::Window,
+        x: Option<i32>,
+        y: Option<i32>,
+        width: Option<u32>,
+        height: Option<u32>,
+        border_width: Option<u32>,
+        sibling: Option<xproto::Window>,
+        stack_mode: Option<StackMode>,
+    ) -> std::result::Result<(), RPCError> {
+        let stack_mode = stack_mode.map(|m| xproto::StackMode::from(m));
+        self.conn
+            .configure_window(
+                window,
+                &xproto::ConfigureWindowAux {
+                    x,
+                    y,
+                    width,
+                    height,
+                    border_width,
+                    sibling,
+                    stack_mode,
+                },
+            )
+            .into_rpc_error()?
+            .check()
+            .into_rpc_error()
+    }
+}
+
 fn main() -> Result<()> {
     let (conn, screen) = x11rb::connect(None)?;
     let root = conn.setup().roots[screen].root;
@@ -372,18 +415,33 @@ fn main() -> Result<()> {
         let children = conn.query_tree(root)?.reply()?.children;
         let clients = children
             .into_iter()
-            .map(|child| (child, conn.get_geometry(child)))
+            .map(|child| {
+                (
+                    child,
+                    conn.get_geometry(child),
+                    conn.get_property(
+                        false,
+                        child,
+                        xproto::AtomEnum::WM_NAME,
+                        xproto::AtomEnum::STRING,
+                        0,
+                        0,
+                    ),
+                )
+            })
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|(child, cookie)| {
-                let reply = cookie?.reply()?;
+            .map(|(child, cookie1, cookie2)| {
+                let geom = cookie1?.reply()?;
+                let name = cookie2?.reply()?;
                 Ok((
                     child,
                     Client {
-                        x: reply.x,
-                        y: reply.y,
-                        width: reply.width,
-                        height: reply.height,
+                        x: geom.x,
+                        y: geom.y,
+                        width: geom.width,
+                        height: geom.height,
+                        name: name.value,
                     },
                 ))
             })
@@ -404,13 +462,54 @@ fn main() -> Result<()> {
         state: Mutex::new(OxWMState { clients }),
     });
 
-    // Spawn a thread to handle IPC.
-    let ipc_recv = unix_ipc::Receiver::connect("/tmp/oxwm")?;
+    // Spawn a thread to handle RPC.
+    let server = UnixListener::bind("/tmp/oxwm")?;
     let oxwm_clone = oxwm.clone();
-    thread::spawn(|| handle_ipc(oxwm_clone, ipc_recv));
-
-    match oxwm.conn.wait_for_event()? {
-        _ => todo!(),
+    thread::spawn(move || loop {
+        let (sock, _) = server.accept().unwrap();
+        OxRPCServer::new(oxwm_clone.clone(), BincodeTransport::new(sock))
+            .serve_single_call()
+            .unwrap();
+    });
+    loop {
+        match oxwm.conn.wait_for_event()? {
+            Event::CreateNotify(ev) =>
+            // TODO .lock() is difficult. It returns a Result<T,
+            // PoisonError<T>>; and since T occurs in the error type, Rust
+            // (correctly) infers that the error must not outlive the thing
+            // we're trying to acquire. This is incompatible with the
+            // error-handling discipline we've adopted, so we're just calling
+            // .unwrap() right now.
+            //
+            // (Sidenote: something about the way type parameters interact with
+            // the lifetime checker bothers me. Like, what if PoisonError<T>
+            // only contained a PhantomData<T>, not an actual T? Then the
+            // lifetime constraint would be way too strict. Rust's assumption
+            // that anything with a type parameter T has-a T is confusing, and
+            // probably prevents the language from ever having real type-level
+            // lambdas.)
+            {
+                let mut st = oxwm.state.lock().unwrap();
+                let client = st.clients.get_mut(&ev.window).unwrap();
+                client.x = ev.x;
+                client.y = ev.y;
+                client.width = ev.width;
+                client.height = ev.height;
+            }
+            Event::ConfigureNotify(ev) => {
+                let mut st = oxwm.state.lock().unwrap();
+                let client = st.clients.get_mut(&ev.window).unwrap();
+                client.x = ev.x;
+                client.y = ev.y;
+                client.width = ev.width;
+                client.height = ev.height;
+            }
+            Event::DestroyNotify(ev) => {
+                let mut st = oxwm.state.lock().unwrap();
+                st.clients.remove(&ev.event);
+            }
+            _ => (),
+        }
     }
     Ok(())
 }
@@ -432,17 +531,17 @@ fn main() -> Result<()> {
 //     }
 // }
 
-fn handle_ipc<Conn>(
-    oxwm: Arc<OxWM<Conn>>,
-    ipc_recv: unix_ipc::Receiver<(unix_ipc::Sender<OxWMState>, Request)>,
-) -> ! {
-    loop {
-        // TODO We probably shouldn't use unwrap() here; I think some other client
-        // application could send malformed messages, which would manifest as
-        // errors, which (as things stand) would crash the IPC thread.
-        let (ipc_send, req) = ipc_recv.recv().unwrap();
-        match req {
-            Request::Ls => {}
-        }
-    }
-}
+// fn handle_ipc<Conn>(
+//     oxwm: Arc<OxWM<Conn>>,
+//     ipc_recv: unix_ipc::Receiver<(unix_ipc::Sender<OxWMState>, Request)>,
+// ) -> ! {
+//     loop {
+//         // TODO We probably shouldn't use unwrap() here; I think some other client
+//         // application could send malformed messages, which would manifest as
+//         // errors, which (as things stand) would crash the IPC thread.
+//         let (ipc_send, req) = ipc_recv.recv().unwrap();
+//         match req {
+//             Request::Ls => {}
+//         }
+//     }
+// }
