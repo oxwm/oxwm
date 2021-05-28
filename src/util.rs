@@ -1,5 +1,10 @@
 use std::convert::TryInto;
+
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
+use x11rb::protocol::xproto::ConnectionExt;
+
+use crate::Result;
 
 pub fn event_mask_to_u16(mask: xproto::EventMask) -> u16 {
     // HACK There seems (?) to be no canonical way to convert an EventMask to a

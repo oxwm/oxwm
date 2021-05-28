@@ -1,30 +1,38 @@
 mod action;
 mod config;
-use config::Config;
+mod ext;
 mod util;
-use util::*;
 
+use std::collections::HashMap;
 use std::error::Error;
-use std::{collections::HashMap, process::Command};
+use std::process::Command;
+
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
+use x11rb::protocol::xproto::ConfigureWindowAux;
 use x11rb::protocol::xproto::ConnectionExt;
 use x11rb::protocol::Event::*;
-use x11rb::{connection::Connection, protocol::xproto::ConfigureWindowAux};
+
+use config::Config;
+use ext::conn::OxConnectionExt;
+use util::*;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
 /// anything with errors other than letting them bubble up to the user, so this
 /// is fine for now.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-pub struct OxWM<Conn> {
+pub(crate) struct OxWM<Conn> {
     /// The source of all our problems.
     conn: Conn,
-    /// The screen we're connected on.
-    screen: xproto::Screen,
+    /// The index of the screen we're connected on.
+    screen: usize,
     /// Configuration data.
     config: Config<Conn>,
     /// Local client data.
-    clients: Clients,
+    clients: HashMap<xproto::Window, Client>,
+    /// The currently-focused window.
+    focus: Option<xproto::Window>,
     /// "Keep going" flag. If this is set to `false` at the start of the event
     /// loop, the window manager will stop running.
     keep_going: bool,
@@ -32,17 +40,8 @@ pub struct OxWM<Conn> {
     drag: Option<Drag>,
 }
 
-/// The state of a window drag.
-struct Drag {
-    /// The window that is being dragged.
-    window: xproto::Window,
-    /// The x-position of the pointer relative to the window.
-    x: i16,
-    /// The y-position of the pointer relative to the window.
-    y: i16,
-}
-
 impl<Conn> OxWM<Conn> {
+    /// Initialize the window manager.
     fn new(conn: Conn, screen: usize) -> Result<OxWM<Conn>>
     where
         Conn: Connection,
@@ -50,55 +49,99 @@ impl<Conn> OxWM<Conn> {
         // Unfortunately, we can't acquire a connection here; we have to accept
         // one as an argument. Why? Because `x11rb::connect` returns an
         // existential `Connection`, but `Conn` is universally quantified.
-        let setup = conn.setup();
-        let screen = setup.roots[screen].clone();
         log::debug!("Loading config file.");
+        // Load the config file first, since this is where errors are most
+        // likely to occur.
         let config = Config::load()?;
         let mut ret = OxWM {
             conn,
             screen,
             config,
-            clients: Clients::new(),
+            clients: HashMap::new(),
+            focus: None,
             keep_going: true,
             drag: None,
         };
-        // Try to redirect structure events from children of the root window.
-        // Only one client---which must be the WM, essentially by
-        // definition---can do this; so if we fail here, another WM is probably
-        // running.
-        //
-        // (Also, listen for other events we care about.)
-        log::debug!("Selecting SUBSTRUCTURE_REDIRECT on the root window.");
-        let root = ret.screen.root;
-        ret.conn
+        // Grab the server so that we can do setup atomically. We don't need to
+        // worry about ungrabbing if we fail, because this function consumes the
+        // connection.
+        ret.conn.grab_server()?.check()?;
+        ret.init()?;
+        ret.conn.ungrab_server()?.check()?;
+        Ok(ret)
+    }
+
+    /// Perform setup and initialization.
+    fn init(&mut self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        // Try to become the window manager early, so that we can fail early
+        // if necessary.
+        self.become_wm()?;
+        // Find and adopt extant clients.
+        self.manage_extant()?;
+        // General X setup.
+        self.global_setup()?;
+        // Run startup programs.
+        self.run_startup_programs()?;
+        // Done.
+        Ok(())
+    }
+
+    /// Try to become the window manager.
+    fn become_wm(&self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        log::debug!("Trying to become the window manager.");
+        self.conn
             .change_window_attributes(
-                root,
+                self.root(),
+                &xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(xproto::EventMask::SUBSTRUCTURE_REDIRECT),
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    /// Find extant clients and manage them.
+    fn manage_extant(&mut self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        let children = self.conn.query_tree(self.root())?.reply()?.children;
+        for window in children {
+            self.manage(window)?;
+        }
+        Ok(())
+    }
+
+    /// Perform global setup operations that involve the server.
+    fn global_setup(&self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        log::debug!("Setting event mask on the root window.");
+        self.conn
+            .change_window_attributes(
+                self.root(),
                 &xproto::ChangeWindowAttributesAux::new().event_mask(
-                    xproto::EventMask::SUBSTRUCTURE_NOTIFY
+                    xproto::EventMask::FOCUS_CHANGE
+                        | xproto::EventMask::SUBSTRUCTURE_NOTIFY
                         | xproto::EventMask::SUBSTRUCTURE_REDIRECT,
                 ),
             )?
             .check()?;
-        // Run startup programs.
-        log::debug!("Running startup programs.");
-        for program in &ret.config.startup {
-            if let Err(err) = Command::new(program).spawn() {
-                log::warn!("Unable to execute startup program `{}': {:?}", program, err);
-            }
-        }
-        // Adopt already-existing windows.
-        log::debug!("Adopting windows.");
-        ret.adopt_children(root)?;
-        // Get a passive grab on all bound keycodes.
         log::debug!("Grabbing bound keycodes.");
-        ret.config
+        self.config
             .keybinds
             .keys()
             .map(|keycode| {
-                ret.conn.grab_key(
+                self.conn.grab_key(
                     false,
-                    root,
-                    ret.config.mod_mask,
+                    self.root(),
+                    self.config.mod_mask,
                     *keycode,
                     xproto::GrabMode::ASYNC,
                     xproto::GrabMode::ASYNC,
@@ -107,8 +150,18 @@ impl<Conn> OxWM<Conn> {
             .collect::<Vec<_>>()
             .into_iter()
             .try_for_each(|cookie| cookie?.check())?;
-        // Done.
-        Ok(ret)
+        Ok(())
+    }
+
+    /// Run configured startup programs.
+    fn run_startup_programs(&self) -> Result<()> {
+        log::debug!("Running startup programs.");
+        for program in &self.config.startup {
+            if let Err(err) = Command::new(program).spawn() {
+                log::warn!("Unable to execute startup program `{}': {:?}", program, err);
+            }
+        }
+        Ok(())
     }
 
     /// Run the WM. Note that this consumes the OxWM object: once
@@ -144,12 +197,15 @@ impl<Conn> OxWM<Conn> {
                     None => log::error!("ButtonRelease event without a drag."),
                     Some(_) => self.drag = None,
                 },
-                CreateNotify(ev) => {
-                    self.adopt_window(ev.window, ev.x, ev.y, ev.width, ev.height)?;
-                }
-                ConfigureNotify(ev) => self
-                    .clients
-                    .configure(ev.window, ev.x, ev.y, ev.width, ev.height),
+                ConfigureNotify(ev) => match self.clients.get_mut(&ev.window) {
+                    None => log::warn!("Window is not managed."),
+                    Some(client) => {
+                        client.x = ev.x;
+                        client.y = ev.y;
+                        client.width = ev.width;
+                        client.height = ev.height;
+                    }
+                },
                 ConfigureRequest(ev) => {
                     self.conn
                         .configure_window(
@@ -158,15 +214,20 @@ impl<Conn> OxWM<Conn> {
                         )?
                         .check()?;
                 }
-                DestroyNotify(ev) => self.clients.remove(ev.window),
+                DestroyNotify(ev) => {
+                    self.clients.remove(&ev.window);
+                }
+                FocusIn(ev) => self.focus = Some(ev.event),
+                FocusOut(_) => self.focus = None,
                 KeyPress(ev) => {
                     // We're only listening for keycodes that are bound in the keybinds
                     // map (anything else is a bug), so we can call unwrap() with a
                     // clean conscience here.
                     let action = self.config.keybinds.get(&ev.detail).unwrap();
-                    action(&mut self);
+                    action(&mut self)?;
                 }
                 MapRequest(ev) => {
+                    self.manage(ev.window)?;
                     self.conn.map_window(ev.window)?.check()?;
                 }
                 MotionNotify(ev) => match self.drag {
@@ -185,78 +246,23 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
-    /// Adopt all children of the given window.
-    fn adopt_children(&mut self, root: xproto::Window) -> Result<()>
+    /// Begin managing a window.
+    fn manage(&mut self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        let children = self.conn.query_tree(root)?.reply()?.children;
-        self.adopt_windows(children.into_iter())?;
-        Ok(())
-    }
-
-    /// Adopt every window in the provided iterator.
-    fn adopt_windows<Iter>(&mut self, windows: Iter) -> Result<()>
-    where
-        Conn: Connection,
-        Iter: Iterator<Item = xproto::Window>,
-    {
-        let conn = &self.conn;
-        // Send some messages to the server. We send out all the messages before
-        // checking any replies.
-        let cookies = windows
-            .map(|window| {
-                (
-                    window,
-                    conn.get_window_attributes(window),
-                    conn.get_geometry(window),
-                    conn.grab_button(
-                        false,
-                        window,
-                        event_mask_to_u16(
-                            xproto::EventMask::BUTTON_PRESS
-                                | xproto::EventMask::BUTTON_RELEASE
-                                | xproto::EventMask::POINTER_MOTION,
-                        ),
-                        xproto::GrabMode::ASYNC,
-                        xproto::GrabMode::ASYNC,
-                        x11rb::NONE,
-                        x11rb::NONE,
-                        xproto::ButtonIndex::M1,
-                        self.config.mod_mask,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
-        for (window, cookie1, cookie2, cookie3) in cookies {
-            // REVIEW Here is my reasoning for this code. If a cookie is an Err,
-            // then there was a connection error, which is fatal. But if a
-            // reply/check is an Err, that just means that the window is gone.
-            match (cookie1?.reply(), cookie2?.reply(), cookie3?.check()) {
-                (Ok(_), Ok(geom), Ok(_)) => {
-                    self.clients
-                        .add(window, geom.x, geom.y, geom.width, geom.height)
-                }
-                _ => log::warn!("Something went wrong while adopting window {}.", window),
-            }
-        }
-        Ok(())
-    }
-
-    /// Adopt a single window using information that is already at-hand.
-    fn adopt_window(
-        &mut self,
-        window: xproto::Window,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-    ) -> Result<()>
-    where
-        Conn: Connection,
-    {
-        log::debug!("Adopting window {}.", window);
-        let cookie = self.conn.grab_button(
+        log::debug!("Managing window {}.", window);
+        // [Send out requests...
+        let cookie1 = self.conn.get_window_attributes(window);
+        let cookie2 = self.conn.get_geometry(window);
+        // Get WM_NAME.
+        let cookie3 = self.conn.get_property_simple(
+            window,
+            xproto::AtomEnum::WM_NAME,
+            xproto::AtomEnum::STRING,
+        );
+        // Grab modifier+M1-press.
+        let cookie4 = self.conn.grab_button(
             false,
             window,
             event_mask_to_u16(
@@ -271,77 +277,84 @@ impl<Conn> OxWM<Conn> {
             xproto::ButtonIndex::M1,
             self.config.mod_mask,
         );
-        match cookie?.check() {
-            Ok(_) => self.clients.add(window, x, y, width, height),
-            Err(err) => log::warn!("{:?}", err),
+        // Set our desired event mask.
+        let cookie5 = self.conn.change_window_attributes(
+            window,
+            &xproto::ChangeWindowAttributesAux::new()
+                .event_mask(xproto::EventMask::FOCUS_CHANGE | xproto::EventMask::PROPERTY_CHANGE),
+        );
+        // ...and put everything together at the end.]
+        match (
+            cookie1?.reply(),
+            cookie2?.reply(),
+            cookie3?.reply(),
+            cookie4?.check(),
+            cookie5?.check(),
+        ) {
+            (Ok(attrs), Ok(geom), Ok(prop_wm_name), Ok(_), Ok(_)) => {
+                if attrs.override_redirect {
+                    log::debug!("Ignoring window with override-redirect set.");
+                } else {
+                    // TODO Implement compound text decoding.
+                    let name = String::from_utf8(prop_wm_name.value).unwrap();
+                    log::debug!("Window name: {}.", name);
+                    self.clients.insert(
+                        window,
+                        Client {
+                            x: geom.x,
+                            y: geom.y,
+                            width: geom.width,
+                            height: geom.height,
+                            name,
+                        },
+                    );
+                }
+            }
+            _ => log::warn!("Error while trying to manage the window."),
         }
         Ok(())
     }
+
+    /// Kill the currently-focused client.
+    fn kill_focused_client(&self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        log::debug!("Destroying focused window.");
+        match self.focus {
+            None => log::debug!("No focused window."),
+            Some(window) => self.conn.kill_client(window)?.check()?,
+        }
+        Ok(())
+    }
+
+    /// Get the root window.
+    fn root(&self) -> xproto::Window
+    where
+        Conn: Connection,
+    {
+        self.conn.setup().roots[self.screen].root
+    }
 }
 
-// We don't actually have any use for this data yet, but I assume we will at
-// some point...
 #[derive(Debug)]
 struct Client {
-    _x: i16,
-    _y: i16,
-    _width: u16,
-    _height: u16,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    name: String,
 }
 
-/// Local data about window states.
-struct Clients {
-    clients: HashMap<xproto::Window, Client>,
-}
-
-impl Clients {
-    fn new() -> Clients {
-        Clients {
-            clients: HashMap::new(),
-        }
-    }
-
-    fn add(&mut self, window: xproto::Window, x: i16, y: i16, width: u16, height: u16) {
-        log::debug!("Adding window {}.", window);
-        if self.clients.contains_key(&window) {
-            log::error!("Tried to add window {}, which is already managed.", window);
-            return;
-        }
-        self.clients.insert(
-            window,
-            Client {
-                _x: x,
-                _y: y,
-                _width: width,
-                _height: height,
-            },
-        );
-    }
-
-    /// Set local client data.
-    fn configure(&mut self, window: xproto::Window, x: i16, y: i16, width: u16, height: u16) {
-        log::debug!("Configuring window {}.", window);
-        match self.clients.get_mut(&window) {
-            None => log::error!("Tried to configure window {}, which isn't managed.", window),
-            Some(client) => {
-                client._x = x;
-                client._y = y;
-                client._width = width;
-                client._height = height;
-            }
-        }
-    }
-
-    /// Remove a window from the managed set.
-    fn remove(&mut self, window: xproto::Window) {
-        log::debug!("Removing window {}.", window);
-        if self.clients.remove(&window).is_none() {
-            // This is only a warning, because this situation can happen even if
-            // we don't do anything wrong: a window can be created and destroyed
-            // before we get the chance to manage it.
-            log::warn!("Tried to remove window {}, which isn't managed.", window);
-        }
-    }
+/// The state of a window drag.
+#[derive(Debug)]
+struct Drag {
+    /// The window that is being dragged.
+    window: xproto::Window,
+    /// The x-position of the pointer relative to the window.
+    x: i16,
+    /// The y-position of the pointer relative to the window.
+    y: i16,
 }
 
 fn run_wm() -> Result<()> {

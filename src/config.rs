@@ -1,5 +1,6 @@
 use crate::action;
 use crate::action::Action;
+use crate::OxWM;
 use crate::Result;
 
 use std::convert::TryFrom;
@@ -13,6 +14,7 @@ use serde::Deserializer;
 
 use thiserror::Error;
 
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 
 /// Bespoke `ModMask` type so that we can have a `Deserialize` instance.
@@ -54,22 +56,25 @@ struct RawConfig {
 
 /// Type of OxWM configs. Has to be parameterized by the connection type,
 /// because Rust doesn't have higher-rank types yet.
-pub struct Config<Conn> {
-    pub startup: Vec<String>,
-    pub mod_mask: xproto::ModMask,
-    pub keybinds: HashMap<xproto::Keycode, Action<Conn>>,
+pub(crate) struct Config<Conn> {
+    pub(crate) startup: Vec<String>,
+    pub(crate) mod_mask: xproto::ModMask,
+    pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
 }
 
 #[derive(Debug, Error)]
 #[error("unsupported platform (I don't know where to look for your config file)")]
-pub struct UnsupportedPlatformError;
+pub(crate) struct UnsupportedPlatformError;
 
 impl<Conn> Config<Conn> {
     /// Load the config file, or return a default config object if there is no
     /// config file.
-    pub fn load() -> Result<Self> {
-        // TODO Will this work on Unix? We should probably make sure it works on
-        // Unix.
+    pub(crate) fn load() -> Result<Self>
+    where
+        Conn: Connection,
+    {
+        // TODO Will this work on Unix (e.g., BSD)? We should probably make sure
+        // it works on Unix.
         let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
         path.push("oxwm");
         path.push("config.toml");
@@ -77,13 +82,19 @@ impl<Conn> Config<Conn> {
     }
 
     /// Load a specified config file.
-    fn from_path(path: &Path) -> Result<Self> {
+    fn from_path(path: &Path) -> Result<Self>
+    where
+        Conn: Connection,
+    {
         let s = fs::read_to_string(path)?;
         Self::from_str(&s)
     }
 
     /// Parse a string directly.
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self>
+    where
+        Conn: Connection,
+    {
         toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)
     }
 }
@@ -97,7 +108,10 @@ enum ConfigError {
 }
 use ConfigError::*;
 
-impl<Conn> TryFrom<RawConfig> for Config<Conn> {
+impl<Conn> TryFrom<RawConfig> for Config<Conn>
+where
+    Conn: Connection,
+{
     type Error = Box<dyn Error>;
     fn try_from(raw: RawConfig) -> Result<Self> {
         let startup = raw.startup.unwrap_or_default();
@@ -106,6 +120,7 @@ impl<Conn> TryFrom<RawConfig> for Config<Conn> {
         for (keycode, action_name) in raw.keybinds.unwrap_or_default() {
             let keycode = keycode.parse::<u8>().map_err(KeycodeError)?;
             let action: Result<Action<Conn>> = match action_name.as_str() {
+                "kill" => Ok(|oxwm| OxWM::kill_focused_client(&*oxwm)),
                 "quit" => Ok(action::quit),
                 _ => Err(Box::new(ActionError(action_name.clone()))),
             };
@@ -119,7 +134,10 @@ impl<Conn> TryFrom<RawConfig> for Config<Conn> {
     }
 }
 
-impl<'de, Conn> Deserialize<'de> for Config<Conn> {
+impl<'de, Conn> Deserialize<'de> for Config<Conn>
+where
+    Conn: Connection,
+{
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,

@@ -2,8 +2,9 @@
 
 use crate::OxWM;
 
-pub type Action<Conn> = fn(&mut OxWM<Conn>);
+pub(crate) type Action<Conn> = fn(&mut OxWM<Conn>) -> crate::Result<()>;
 
-pub fn quit<Conn>(oxwm: &mut OxWM<Conn>) {
+pub(crate) fn quit<Conn>(oxwm: &mut OxWM<Conn>) -> crate::Result<()> {
     oxwm.keep_going = false;
+    Ok(())
 }
