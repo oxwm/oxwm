@@ -1,5 +1,3 @@
-use crate::action;
-use crate::action::Action;
 use crate::OxWM;
 use crate::Result;
 
@@ -16,6 +14,9 @@ use thiserror::Error;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
+
+/// Type of actions that may be triggered by keypresses.
+type Action<Conn> = fn(&mut OxWM<Conn>) -> crate::Result<()>;
 
 /// Bespoke `ModMask` type so that we can have a `Deserialize` instance.
 #[derive(Deserialize)]
@@ -120,8 +121,8 @@ where
         for (keycode, action_name) in raw.keybinds.unwrap_or_default() {
             let keycode = keycode.parse::<u8>().map_err(KeycodeError)?;
             let action: Result<Action<Conn>> = match action_name.as_str() {
-                "kill" => Ok(|oxwm| OxWM::kill_focused_client(&*oxwm)),
-                "quit" => Ok(action::quit),
+                "kill" => Ok(OxWM::kill_focused_client),
+                "quit" => Ok(OxWM::poison),
                 _ => Err(Box::new(ActionError(action_name.clone()))),
             };
             keybinds.insert(keycode, action?);

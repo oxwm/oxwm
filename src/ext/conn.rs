@@ -1,14 +1,13 @@
 use x11rb::connection::Connection;
-use x11rb::connection::RequestConnection;
 use x11rb::cookie::Cookie;
 use x11rb::errors::ConnectionError;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt;
 
 /// Trait that extends an X11 connection with some convenience functions.
-pub(crate) trait OxConnectionExt: RequestConnection {
-    /// Like `get_property`, but with fewer parameters, so you have fewer things
-    /// to worry about.
+pub(crate) trait OxConnectionExt: Connection {
+    /// Like `get_property`, but with fewer parameters, so the caller has fewer
+    /// things to worry about.
     fn get_property_simple<A, B>(
         &self,
         window: xproto::Window,
@@ -39,9 +38,10 @@ where
         B: Into<xproto::Atom>,
     {
         self.get_property(
-            false, window, property, type_, 0,
-            // Arbitrary large number. (Approximately one million, which is
-            // what XGetWMProtocols uses.)
+            // Don't delete the property. (Why is this even an option in get_property()?)
+            false, window, property, type_, 0, // Offset of 0.
+            // Request an arbitrarily large number of words. (This is
+            // approximately one million words, which is what XGetWMProtocols uses.)
             0x100000,
         )
     }

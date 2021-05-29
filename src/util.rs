@@ -1,14 +1,10 @@
 use std::convert::TryInto;
 
-use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
-use x11rb::protocol::xproto::ConnectionExt;
 
-use crate::Result;
-
+/// Convert an `EventMask` to a `u16`. Note that not every event mask is
+/// convertible
 pub fn event_mask_to_u16(mask: xproto::EventMask) -> u16 {
-    // HACK There seems (?) to be no canonical way to convert an EventMask to a
-    // u16. So, instead, we do this:
     let mask = u32::from(mask);
     let mask: u16 = mask.try_into().unwrap();
     mask

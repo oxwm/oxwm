@@ -1,4 +1,3 @@
-mod action;
 mod config;
 mod ext;
 mod util;
@@ -16,6 +15,11 @@ use x11rb::protocol::Event::*;
 use config::Config;
 use ext::conn::OxConnectionExt;
 use util::*;
+
+/// Minimum client width.
+const MIN_WIDTH: u32 = 256;
+/// Minimum client height.
+const MIN_HEIGHT: u32 = 256;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
 /// anything with errors other than letting them bubble up to the user, so this
@@ -63,8 +67,11 @@ impl<Conn> OxWM<Conn> {
             drag: None,
         };
         // Grab the server so that we can do setup atomically. We don't need to
-        // worry about ungrabbing if we fail, because this function consumes the
-        // connection.
+        // worry about ungrabbing if we fail: this function consumes the
+        // connection, so if we fail, the connection will just get dropped.
+        //
+        // TODO Not sure whether it's strictly necessary to grab the server, but
+        // it gives me some peace of mind. Should probably investigate.
         ret.conn.grab_server()?.check()?;
         ret.init()?;
         ret.conn.ungrab_server()?.check()?;
@@ -80,7 +87,7 @@ impl<Conn> OxWM<Conn> {
         // if necessary.
         self.become_wm()?;
         // Find and adopt extant clients.
-        self.manage_extant()?;
+        self.manage_extant_clients()?;
         // General X setup.
         self.global_setup()?;
         // Run startup programs.
@@ -106,7 +113,7 @@ impl<Conn> OxWM<Conn> {
     }
 
     /// Find extant clients and manage them.
-    fn manage_extant(&mut self) -> Result<()>
+    fn manage_extant_clients(&mut self) -> Result<()>
     where
         Conn: Connection,
     {
@@ -172,50 +179,66 @@ impl<Conn> OxWM<Conn> {
     {
         while self.keep_going {
             let ev = self.conn.wait_for_event()?;
-            log::debug!("{:?}", ev);
+            log::trace!("{:?}", ev);
             match ev {
                 ButtonPress(ev) => {
-                    // We're only listening for button presses on button 1 with
-                    // the modifier key down, so if we get a ButtonPress event,
-                    // we start dragging.
-                    if !ev.same_screen {
-                        // TODO
-                        log::error!("Don't know what to do when same_screen is false.");
-                        continue;
-                    }
-                    if self.drag.is_some() {
-                        log::error!("ButtonPress event during a drag.");
-                        continue;
-                    }
+                    let window = ev.event;
+                    // The client must still be in the map, since the event
+                    // we're processing now can't temporally succeed a
+                    // DestroyWindow event for the same window.
+                    let client = self.clients.get(&window).unwrap();
+                    let (type_, corner) = match ev.detail {
+                        1 => (DragType::MOVE, Corner::LeftTop),
+                        3 => {
+                            let mid_x = (client.width / 2) as i16;
+                            let mid_y = (client.height / 2) as i16;
+                            let corner = match (ev.event_x >= mid_x, ev.event_y >= mid_y) {
+                                (false, false) => Corner::LeftTop,
+                                (false, true) => Corner::LeftBottom,
+                                (true, false) => Corner::RightTop,
+                                (true, true) => Corner::RightBottom,
+                            };
+                            (DragType::RESIZE(corner), corner)
+                        }
+                        _ => {
+                            log::error!("Invalid button.");
+                            continue;
+                        }
+                    };
+                    let (x, y) = client.corner_rel(corner);
+                    let x = ev.event_x - (x as i16);
+                    let y = ev.event_y - (y as i16);
                     self.drag = Some(Drag {
-                        window: ev.event,
-                        x: ev.event_x,
-                        y: ev.event_y,
-                    })
+                        type_,
+                        window,
+                        x,
+                        y,
+                    });
                 }
-                ButtonRelease(_) => match self.drag {
-                    None => log::error!("ButtonRelease event without a drag."),
-                    Some(_) => self.drag = None,
-                },
-                ConfigureNotify(ev) => match self.clients.get_mut(&ev.window) {
-                    None => log::warn!("Window is not managed."),
-                    Some(client) => {
+                ButtonRelease(_) => self.drag = None,
+                ConfigureNotify(ev) => {
+                    if let Some(client) = self.clients.get_mut(&ev.window) {
                         client.x = ev.x;
                         client.y = ev.y;
                         client.width = ev.width;
                         client.height = ev.height;
                     }
-                },
+                }
                 ConfigureRequest(ev) => {
+                    let value_list = xproto::ConfigureWindowAux::from_configure_request(&ev);
+                    let width = value_list.width.map(|w| w.max(MIN_WIDTH));
+                    let height = value_list.height.map(|h| h.max(MIN_HEIGHT));
                     self.conn
-                        .configure_window(
-                            ev.window,
-                            &xproto::ConfigureWindowAux::from_configure_request(&ev),
-                        )?
-                        .check()?;
+                        .configure_window(ev.window, &value_list.width(width).height(height))?;
                 }
                 DestroyNotify(ev) => {
                     self.clients.remove(&ev.window);
+                    // If we were dragging the window, stop dragging it.
+                    if let Some(ref drag) = self.drag {
+                        if drag.window == ev.window {
+                            self.drag = None;
+                        }
+                    }
                 }
                 FocusIn(ev) => self.focus = Some(ev.event),
                 FocusOut(_) => self.focus = None,
@@ -233,11 +256,83 @@ impl<Conn> OxWM<Conn> {
                 MotionNotify(ev) => match self.drag {
                     None => log::error!("MotionNotify event without a drag."),
                     Some(ref drag) => {
-                        let x = (ev.root_x - drag.x) as i32;
-                        let y = (ev.root_y - drag.y) as i32;
-                        self.conn
-                            .configure_window(drag.window, &ConfigureWindowAux::new().x(x).y(y))?
-                            .check()?;
+                        let config = match drag.type_ {
+                            DragType::MOVE => {
+                                let x = (ev.root_x - drag.x) as i32;
+                                let y = (ev.root_y - drag.y) as i32;
+                                ConfigureWindowAux::new().x(x).y(y)
+                            }
+                            DragType::RESIZE(corner) => {
+                                // The client must still be in the map, since the event
+                                // we're processing now can't temporally succeed a
+                                // DestroyWindow event for the same window.
+                                let client = self.clients.get(&drag.window).unwrap();
+                                match corner {
+                                    Corner::LeftTop => {
+                                        let mut x = ev.root_x - drag.x;
+                                        let mut width =
+                                            client.width as i32 - ((x - client.x) as i32);
+                                        if width < MIN_WIDTH as i32 {
+                                            width = MIN_WIDTH as i32;
+                                            x = client.x;
+                                        }
+                                        let width = width as u32;
+                                        let x = x as i32;
+                                        let mut y = ev.root_y - drag.y;
+                                        let mut height =
+                                            client.height as i32 - ((y - client.y) as i32);
+                                        if height < MIN_HEIGHT as i32 {
+                                            height = MIN_HEIGHT as i32;
+                                            y = client.y;
+                                        }
+                                        let height = height as u32;
+                                        let y = y as i32;
+                                        ConfigureWindowAux::new()
+                                            .x(x)
+                                            .y(y)
+                                            .width(width)
+                                            .height(height)
+                                    }
+                                    Corner::LeftBottom => {
+                                        let height =
+                                            ((ev.event_y - drag.y).max(0) as u32).max(MIN_HEIGHT);
+                                        let mut x = ev.root_x - drag.x;
+                                        let mut width =
+                                            client.width as i32 - ((x - client.x) as i32);
+                                        if width < MIN_WIDTH as i32 {
+                                            width = MIN_WIDTH as i32;
+                                            x = client.x;
+                                        }
+                                        let width = width as u32;
+                                        let x = x as i32;
+                                        ConfigureWindowAux::new().x(x).width(width).height(height)
+                                    }
+                                    Corner::RightTop => {
+                                        let width =
+                                            ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
+                                        let mut y = ev.root_y - drag.y;
+                                        let mut height =
+                                            client.height as i32 - ((y - client.y) as i32);
+                                        if height < MIN_HEIGHT as i32 {
+                                            height = MIN_HEIGHT as i32;
+                                            y = client.y;
+                                        }
+                                        let height = height as u32;
+                                        let y = y as i32;
+                                        ConfigureWindowAux::new().y(y).width(width).height(height)
+                                    }
+                                    Corner::RightBottom => {
+                                        let width =
+                                            ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
+                                        let height =
+                                            ((ev.event_y - drag.y).max(0) as u32).max(MIN_WIDTH);
+                                        ConfigureWindowAux::new().width(width).height(height)
+                                    }
+                                }
+                            }
+                        };
+                        log::debug!("request: {:?}", config);
+                        self.conn.configure_window(drag.window, &config)?.check()?;
                     }
                 },
                 _ => log::warn!("Unhandled event!"),
@@ -261,7 +356,7 @@ impl<Conn> OxWM<Conn> {
             xproto::AtomEnum::WM_NAME,
             xproto::AtomEnum::STRING,
         );
-        // Grab modifier+M1-press.
+        // Grab modifier + left or right mouse button.
         let cookie4 = self.conn.grab_button(
             false,
             window,
@@ -277,8 +372,23 @@ impl<Conn> OxWM<Conn> {
             xproto::ButtonIndex::M1,
             self.config.mod_mask,
         );
+        let cookie5 = self.conn.grab_button(
+            false,
+            window,
+            event_mask_to_u16(
+                xproto::EventMask::BUTTON_PRESS
+                    | xproto::EventMask::BUTTON_RELEASE
+                    | xproto::EventMask::POINTER_MOTION,
+            ),
+            xproto::GrabMode::ASYNC,
+            xproto::GrabMode::ASYNC,
+            x11rb::NONE,
+            x11rb::NONE,
+            xproto::ButtonIndex::M3,
+            self.config.mod_mask,
+        );
         // Set our desired event mask.
-        let cookie5 = self.conn.change_window_attributes(
+        let cookie6 = self.conn.change_window_attributes(
             window,
             &xproto::ChangeWindowAttributesAux::new()
                 .event_mask(xproto::EventMask::FOCUS_CHANGE | xproto::EventMask::PROPERTY_CHANGE),
@@ -290,11 +400,10 @@ impl<Conn> OxWM<Conn> {
             cookie3?.reply(),
             cookie4?.check(),
             cookie5?.check(),
+            cookie6?.check(),
         ) {
-            (Ok(attrs), Ok(geom), Ok(prop_wm_name), Ok(_), Ok(_)) => {
-                if attrs.override_redirect {
-                    log::debug!("Ignoring window with override-redirect set.");
-                } else {
+            (Ok(attrs), Ok(geom), Ok(prop_wm_name), Ok(_), Ok(_), Ok(_)) => {
+                if !attrs.override_redirect {
                     // TODO Implement compound text decoding.
                     let name = String::from_utf8(prop_wm_name.value).unwrap();
                     log::debug!("Window name: {}.", name);
@@ -315,18 +424,29 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
+    // Actions go here. Note that, due to the need to conform to the Action
+    // type, these functions' type signatures may sometimes seem odd.
+
     /// Kill the currently-focused client.
-    fn kill_focused_client(&self) -> Result<()>
+    fn kill_focused_client(&mut self) -> Result<()>
     where
         Conn: Connection,
     {
-        log::debug!("Destroying focused window.");
+        log::debug!("Killing the focused client.");
         match self.focus {
-            None => log::debug!("No focused window."),
+            None => log::debug!("No focused client."),
             Some(window) => self.conn.kill_client(window)?.check()?,
         }
         Ok(())
     }
+
+    /// Poison the window manager, causing it to die promptly.
+    fn poison(&mut self) -> Result<()> {
+        self.keep_going = false;
+        Ok(())
+    }
+
+    // Simple utility stuff goes here.
 
     /// Get the root window.
     fn root(&self) -> xproto::Window
@@ -337,23 +457,57 @@ impl<Conn> OxWM<Conn> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Client {
+    /// Horizontal position.
     x: i16,
+    /// Vertical position.
     y: i16,
+    /// Horizontal extent.
     width: u16,
+    /// Vertical extent.
     height: u16,
+    /// Client name.
     name: String,
 }
 
+impl Client {
+    fn corner_rel(&self, corner: Corner) -> (u16, u16) {
+        match corner {
+            Corner::LeftTop => (0, 0),
+            Corner::LeftBottom => (0, self.height),
+            Corner::RightTop => (self.width, 0),
+            Corner::RightBottom => (self.width, self.height),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Corner {
+    LeftTop,
+    LeftBottom,
+    RightTop,
+    RightBottom,
+}
+
+#[derive(Clone, Debug)]
+enum DragType {
+    MOVE,
+    RESIZE(Corner),
+}
+
 /// The state of a window drag.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Drag {
+    /// The type of drag.
+    type_: DragType,
     /// The window that is being dragged.
     window: xproto::Window,
-    /// The x-position of the pointer relative to the window.
+    /// The x-position of the pointer relative to (a certain corner of) the
+    /// window.
     x: i16,
-    /// The y-position of the pointer relative to the window.
+    /// The x-position of the pointer relative to (a certain corner of) the
+    /// window.
     y: i16,
 }
 
