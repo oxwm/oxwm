@@ -9,17 +9,19 @@ use std::{collections::HashMap, num::ParseIntError};
 
 use serde::Deserialize;
 use serde::Deserializer;
+use serde::Serialize;
 
 use thiserror::Error;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 
-/// Type of actions that may be triggered by keypresses.
-type Action<Conn> = fn(&mut OxWM<Conn>) -> crate::Result<()>;
+/// Type of actions that may be triggered by keypresses. The `Window` argument
+/// is the currently-focused window.
+type Action<Conn> = fn(&mut OxWM<Conn>, xproto::Window) -> crate::Result<()>;
 
 /// Bespoke `ModMask` type so that we can have a `Deserialize` instance.
-#[derive(Deserialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ModMask {
     Shift,
@@ -47,23 +49,40 @@ impl From<ModMask> for xproto::ModMask {
     }
 }
 
+/// Focus model.
+#[derive(PartialEq, Eq, Clone, Copy, Hash, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusModel {
+    /// Click to focus.
+    Click,
+    /// Focus follows mouse.
+    Autofocus,
+    /// Focus follows mouse, and windows come to the front when focused.
+    Autoraise,
+}
+
 /// Type of "raw" configs, straight from the source.
-#[derive(Deserialize)]
+#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
 struct RawConfig {
     startup: Option<Vec<String>>,
     mod_mask: Option<ModMask>,
+    focus_model: Option<FocusModel>,
     keybinds: Option<HashMap<String, String>>,
 }
 
 /// Type of OxWM configs. Has to be parameterized by the connection type,
 /// because Rust doesn't have higher-rank types yet.
+#[derive(Clone)]
 pub(crate) struct Config<Conn> {
     pub(crate) startup: Vec<String>,
     pub(crate) mod_mask: xproto::ModMask,
+    pub(crate) focus_model: FocusModel,
     pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
 }
 
-#[derive(Debug, Error)]
+#[derive(
+    PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash, Error, Deserialize, Serialize,
+)]
 #[error("unsupported platform (I don't know where to look for your config file)")]
 pub(crate) struct UnsupportedPlatformError;
 
@@ -100,7 +119,7 @@ impl<Conn> Config<Conn> {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(PartialEq, Eq, Clone, Debug, Error)]
 enum ConfigError {
     #[error("error while parsing keycode: {0:}")]
     KeycodeError(ParseIntError),
@@ -117,6 +136,7 @@ where
     fn try_from(raw: RawConfig) -> Result<Self> {
         let startup = raw.startup.unwrap_or_default();
         let mod_mask = raw.mod_mask.unwrap_or(ModMask::Mod4).into();
+        let focus_model = raw.focus_model.unwrap_or(FocusModel::Click);
         let mut keybinds = HashMap::new();
         for (keycode, action_name) in raw.keybinds.unwrap_or_default() {
             let keycode = keycode.parse::<u8>().map_err(KeycodeError)?;
@@ -130,6 +150,7 @@ where
         Ok(Self {
             startup,
             mod_mask,
+            focus_model,
             keybinds,
         })
     }
