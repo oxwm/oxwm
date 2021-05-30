@@ -1,11 +1,12 @@
 use x11rb::connection::Connection;
+use x11rb::connection::RequestConnection;
 use x11rb::cookie::Cookie;
 use x11rb::errors::ConnectionError;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt;
 
 /// Trait that extends an X11 connection with some convenience functions.
-pub(crate) trait OxConnectionExt: Connection {
+pub(crate) trait OxConnectionExt {
     /// Like `get_property`, but with fewer parameters, so the caller has fewer
     /// things to worry about.
     fn get_property_simple<A, B>(
@@ -15,6 +16,7 @@ pub(crate) trait OxConnectionExt: Connection {
         type_: B,
     ) -> std::result::Result<Cookie<'_, Self, xproto::GetPropertyReply>, ConnectionError>
     where
+        Self: RequestConnection,
         A: Into<xproto::Atom>,
         B: Into<xproto::Atom>;
 }

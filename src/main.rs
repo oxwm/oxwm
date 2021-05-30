@@ -12,7 +12,7 @@ use x11rb::protocol::xproto::ConfigureWindowAux;
 use x11rb::protocol::xproto::ConnectionExt;
 use x11rb::protocol::Event::*;
 
-use config::Config;
+use config::*;
 use ext::conn::OxConnectionExt;
 use util::*;
 
@@ -33,10 +33,8 @@ pub(crate) struct OxWM<Conn> {
     screen: usize,
     /// Configuration data.
     config: Config<Conn>,
-    /// Local client data.
+    /// Map of frame windows to local client data.
     clients: HashMap<xproto::Window, Client>,
-    /// The currently-focused window.
-    focus: Option<xproto::Window>,
     /// "Keep going" flag. If this is set to `false` at the start of the event
     /// loop, the window manager will stop running.
     keep_going: bool,
@@ -62,7 +60,6 @@ impl<Conn> OxWM<Conn> {
             screen,
             config,
             clients: HashMap::new(),
-            focus: None,
             keep_going: true,
             drag: None,
         };
@@ -86,13 +83,9 @@ impl<Conn> OxWM<Conn> {
         // Try to become the window manager early, so that we can fail early
         // if necessary.
         self.become_wm()?;
-        // Find and adopt extant clients.
         self.manage_extant_clients()?;
-        // General X setup.
         self.global_setup()?;
-        // Run startup programs.
         self.run_startup_programs()?;
-        // Done.
         Ok(())
     }
 
@@ -117,6 +110,7 @@ impl<Conn> OxWM<Conn> {
     where
         Conn: Connection,
     {
+        log::debug!("Managing extant clients.");
         let children = self.conn.query_tree(self.root())?.reply()?.children;
         for window in children {
             self.manage(window)?;
@@ -134,8 +128,7 @@ impl<Conn> OxWM<Conn> {
             .change_window_attributes(
                 self.root(),
                 &xproto::ChangeWindowAttributesAux::new().event_mask(
-                    xproto::EventMask::FOCUS_CHANGE
-                        | xproto::EventMask::SUBSTRUCTURE_NOTIFY
+                    xproto::EventMask::SUBSTRUCTURE_NOTIFY
                         | xproto::EventMask::SUBSTRUCTURE_REDIRECT,
                 ),
             )?
@@ -183,37 +176,15 @@ impl<Conn> OxWM<Conn> {
             match ev {
                 ButtonPress(ev) => {
                     let window = ev.event;
-                    // The client must still be in the map, since the event
-                    // we're processing now can't temporally succeed a
-                    // DestroyWindow event for the same window.
-                    let client = self.clients.get(&window).unwrap();
-                    let (type_, corner) = match ev.detail {
-                        1 => (DragType::MOVE, Corner::LeftTop),
-                        3 => {
-                            let mid_x = (client.width / 2) as i16;
-                            let mid_y = (client.height / 2) as i16;
-                            let corner = match (ev.event_x >= mid_x, ev.event_y >= mid_y) {
-                                (false, false) => Corner::LeftTop,
-                                (false, true) => Corner::LeftBottom,
-                                (true, false) => Corner::RightTop,
-                                (true, true) => Corner::RightBottom,
-                            };
-                            (DragType::RESIZE(corner), corner)
-                        }
-                        _ => {
-                            log::error!("Invalid button.");
-                            continue;
-                        }
-                    };
-                    let (x, y) = client.corner_rel(corner);
-                    let x = ev.event_x - (x as i16);
-                    let y = ev.event_y - (y as i16);
-                    self.drag = Some(Drag {
-                        type_,
-                        window,
-                        x,
-                        y,
-                    });
+                    self.click(window)?;
+                    if ev.state & u16::from(self.config.mod_mask) == 0 {
+                        log::trace!("regular click");
+                        self.conn
+                            .allow_events(xproto::Allow::REPLAY_POINTER, x11rb::CURRENT_TIME)?
+                            .check()?;
+                    } else {
+                        self.begin_drag(window, ev.detail, ev.event_x, ev.event_y);
+                    }
                 }
                 ButtonRelease(_) => self.drag = None,
                 ConfigureNotify(ev) => {
@@ -240,18 +211,25 @@ impl<Conn> OxWM<Conn> {
                         }
                     }
                 }
-                FocusIn(ev) => self.focus = Some(ev.event),
-                FocusOut(_) => self.focus = None,
+                EnterNotify(ev) => {
+                    let window = ev.event;
+                    if let FocusModel::Autofocus | FocusModel::Autoraise = self.config.focus_model {
+                        self.focus(window)?;
+                    }
+                    if let FocusModel::Autoraise = self.config.focus_model {
+                        self.raise(window)?;
+                    }
+                }
                 KeyPress(ev) => {
                     // We're only listening for keycodes that are bound in the keybinds
                     // map (anything else is a bug), so we can call unwrap() with a
                     // clean conscience here.
                     let action = self.config.keybinds.get(&ev.detail).unwrap();
-                    action(&mut self)?;
+                    action(&mut self, ev.event)?;
                 }
                 MapRequest(ev) => {
                     self.manage(ev.window)?;
-                    self.conn.map_window(ev.window)?.check()?;
+                    self.conn.map_window(ev.window)?.check()?
                 }
                 MotionNotify(ev) => match self.drag {
                     None => log::error!("MotionNotify event without a drag."),
@@ -331,7 +309,6 @@ impl<Conn> OxWM<Conn> {
                                 }
                             }
                         };
-                        log::debug!("request: {:?}", config);
                         self.conn.configure_window(drag.window, &config)?.check()?;
                     }
                 },
@@ -341,13 +318,82 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
-    /// Begin managing a window.
+    /// A button has been clicked (without the modifier).
+    fn click(&self, window: xproto::Window) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        self.focus(window)?;
+        self.raise(window)?;
+        Ok(())
+    }
+
+    /// Focus a window.
+    fn focus(&self, window: xproto::Window) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        self.conn
+            .set_input_focus(
+                xproto::InputFocus::POINTER_ROOT,
+                window,
+                x11rb::CURRENT_TIME,
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    /// Raise a window to the front of the stack.
+    fn raise(&self, window: xproto::Window) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        self.conn
+            .configure_window(
+                window,
+                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    fn begin_drag(&mut self, window: xproto::Window, button: xproto::Button, x: i16, y: i16) {
+        let client = self.clients.get(&window).unwrap();
+        let (type_, corner) = match button {
+            1 => (DragType::MOVE, Corner::LeftTop),
+            3 => {
+                // We resize from whatever corner the pointer is
+                // closest to.
+                let mid_x = (client.width / 2) as i16;
+                let mid_y = (client.height / 2) as i16;
+                let corner = match (x >= mid_x, y >= mid_y) {
+                    (false, false) => Corner::LeftTop,
+                    (false, true) => Corner::LeftBottom,
+                    (true, false) => Corner::RightTop,
+                    (true, true) => Corner::RightBottom,
+                };
+                (DragType::RESIZE(corner), corner)
+            }
+            _ => {
+                log::error!("Invalid button.");
+                return;
+            }
+        };
+        let (cx, cy) = client.corner_rel(corner);
+        let x = x - (cx as i16);
+        let y = y - (cy as i16);
+        self.drag = Some(Drag {
+            type_,
+            window,
+            x,
+            y,
+        });
+    }
+
     fn manage(&mut self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        log::debug!("Managing window {}.", window);
-        // [Send out requests...
         let cookie1 = self.conn.get_window_attributes(window);
         let cookie2 = self.conn.get_geometry(window);
         // Get WM_NAME.
@@ -356,8 +402,22 @@ impl<Conn> OxWM<Conn> {
             xproto::AtomEnum::WM_NAME,
             xproto::AtomEnum::STRING,
         );
-        // Grab modifier + left or right mouse button.
+        // Grab modifier + nothing.
+        let nomod: u16 = 0;
+        // TODO I don't fully understand sync/async grab modes.
         let cookie4 = self.conn.grab_button(
+            true,
+            window,
+            event_mask_to_u16(xproto::EventMask::BUTTON_PRESS),
+            xproto::GrabMode::SYNC,
+            xproto::GrabMode::SYNC,
+            x11rb::NONE,
+            x11rb::NONE,
+            xproto::ButtonIndex::M1,
+            nomod,
+        );
+        // Grab modifier + left mouse button.
+        let cookie5 = self.conn.grab_button(
             false,
             window,
             event_mask_to_u16(
@@ -372,7 +432,8 @@ impl<Conn> OxWM<Conn> {
             xproto::ButtonIndex::M1,
             self.config.mod_mask,
         );
-        let cookie5 = self.conn.grab_button(
+        // Grab modifier + right mouse button.
+        let cookie6 = self.conn.grab_button(
             false,
             window,
             event_mask_to_u16(
@@ -388,10 +449,10 @@ impl<Conn> OxWM<Conn> {
             self.config.mod_mask,
         );
         // Set our desired event mask.
-        let cookie6 = self.conn.change_window_attributes(
+        let cookie7 = self.conn.change_window_attributes(
             window,
             &xproto::ChangeWindowAttributesAux::new()
-                .event_mask(xproto::EventMask::FOCUS_CHANGE | xproto::EventMask::PROPERTY_CHANGE),
+                .event_mask(xproto::EventMask::ENTER_WINDOW | xproto::EventMask::PROPERTY_CHANGE),
         );
         // ...and put everything together at the end.]
         match (
@@ -401,8 +462,9 @@ impl<Conn> OxWM<Conn> {
             cookie4?.check(),
             cookie5?.check(),
             cookie6?.check(),
+            cookie7?.check(),
         ) {
-            (Ok(attrs), Ok(geom), Ok(prop_wm_name), Ok(_), Ok(_), Ok(_)) => {
+            (Ok(attrs), Ok(geom), Ok(prop_wm_name), Ok(_), Ok(_), Ok(_), Ok(_)) => {
                 if !attrs.override_redirect {
                     // TODO Implement compound text decoding.
                     let name = String::from_utf8(prop_wm_name.value).unwrap();
@@ -410,6 +472,8 @@ impl<Conn> OxWM<Conn> {
                     self.clients.insert(
                         window,
                         Client {
+                            frame: 0,
+                            contents: 0,
                             x: geom.x,
                             y: geom.y,
                             width: geom.width,
@@ -419,7 +483,10 @@ impl<Conn> OxWM<Conn> {
                     );
                 }
             }
-            _ => log::warn!("Error while trying to manage the window."),
+            err => log::warn!(
+                "Error while trying to manage the window (one of these): {:?}",
+                err
+            ),
         }
         Ok(())
     }
@@ -428,20 +495,16 @@ impl<Conn> OxWM<Conn> {
     // type, these functions' type signatures may sometimes seem odd.
 
     /// Kill the currently-focused client.
-    fn kill_focused_client(&mut self) -> Result<()>
+    fn kill_focused_client(&mut self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        log::debug!("Killing the focused client.");
-        match self.focus {
-            None => log::debug!("No focused client."),
-            Some(window) => self.conn.kill_client(window)?.check()?,
-        }
+        self.conn.kill_client(window)?.check()?;
         Ok(())
     }
 
     /// Poison the window manager, causing it to die promptly.
-    fn poison(&mut self) -> Result<()> {
+    fn poison(&mut self, _: xproto::Window) -> Result<()> {
         self.keep_going = false;
         Ok(())
     }
@@ -459,6 +522,10 @@ impl<Conn> OxWM<Conn> {
 
 #[derive(Clone, Debug)]
 struct Client {
+    /// The frame window.
+    frame: xproto::Window,
+    /// The "real" client window.
+    contents: xproto::Window,
     /// Horizontal position.
     x: i16,
     /// Vertical position.
