@@ -1,8 +1,8 @@
+mod client;
 mod config;
 mod ext;
 mod util;
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::process::Command;
 
@@ -12,8 +12,9 @@ use x11rb::protocol::xproto::ConfigureWindowAux;
 use x11rb::protocol::xproto::ConnectionExt;
 use x11rb::protocol::Event::*;
 
+use client::*;
 use config::*;
-use ext::conn::OxConnectionExt;
+use ext::conn::*;
 use util::*;
 
 /// Minimum client width.
@@ -33,8 +34,10 @@ pub(crate) struct OxWM<Conn> {
     screen: usize,
     /// Configuration data.
     config: Config<Conn>,
-    /// Map of frame windows to local client data.
-    clients: HashMap<xproto::Window, Client>,
+    /// Local client data.
+    clients: Clients,
+    /// The currently-focused window.
+    focus: Option<xproto::Window>,
     /// "Keep going" flag. If this is set to `false` at the start of the event
     /// loop, the window manager will stop running.
     keep_going: bool,
@@ -59,7 +62,8 @@ impl<Conn> OxWM<Conn> {
             conn,
             screen,
             config,
-            clients: HashMap::new(),
+            clients: Clients::new(),
+            focus: None,
             keep_going: true,
             drag: None,
         };
@@ -113,6 +117,20 @@ impl<Conn> OxWM<Conn> {
         log::debug!("Managing extant clients.");
         let children = self.conn.query_tree(self.root())?.reply()?.children;
         for window in children {
+            let attrs = self.conn.get_window_attributes(window)?.reply()?;
+            let state = if attrs.override_redirect {
+                None
+            } else {
+                let geom = self.conn.get_geometry(window)?.reply()?;
+                Some(ClientState {
+                    x: geom.x,
+                    y: geom.y,
+                    width: geom.width,
+                    height: geom.height,
+                    is_viewable: attrs.map_state == xproto::MapState::VIEWABLE,
+                })
+            };
+            self.clients.push(Client { window, state });
             self.manage(window)?;
         }
         Ok(())
@@ -178,7 +196,6 @@ impl<Conn> OxWM<Conn> {
                     let window = ev.event;
                     self.click(window)?;
                     if ev.state & u16::from(self.config.mod_mask) == 0 {
-                        log::trace!("regular click");
                         self.conn
                             .allow_events(xproto::Allow::REPLAY_POINTER, x11rb::CURRENT_TIME)?
                             .check()?;
@@ -188,22 +205,60 @@ impl<Conn> OxWM<Conn> {
                 }
                 ButtonRelease(_) => self.drag = None,
                 ConfigureNotify(ev) => {
-                    if let Some(client) = self.clients.get_mut(&ev.window) {
-                        client.x = ev.x;
-                        client.y = ev.y;
-                        client.width = ev.width;
-                        client.height = ev.height;
+                    if ev.above_sibling == x11rb::NONE {
+                        self.clients.to_bottom(ev.window);
+                    } else {
+                        self.clients.to_above(ev.window, ev.above_sibling);
+                    }
+                    if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
+                        st.x = ev.x;
+                        st.y = ev.y;
+                        st.width = ev.width;
+                        st.height = ev.height;
                     }
                 }
                 ConfigureRequest(ev) => {
-                    let value_list = xproto::ConfigureWindowAux::from_configure_request(&ev);
-                    let width = value_list.width.map(|w| w.max(MIN_WIDTH));
-                    let height = value_list.height.map(|h| h.max(MIN_HEIGHT));
+                    let mut value_list = xproto::ConfigureWindowAux::from_configure_request(&ev);
+                    if self.clients.get(ev.window).is_managed() {
+                        value_list.width = value_list.width.map(|w| w.max(MIN_WIDTH));
+                        value_list.height = value_list.height.map(|h| h.max(MIN_HEIGHT));
+                    }
                     self.conn
-                        .configure_window(ev.window, &value_list.width(width).height(height))?;
+                        .configure_window(ev.window, &value_list)?
+                        .check()?;
+                }
+                CreateNotify(ev) => {
+                    self.clients.push(Client {
+                        window: ev.window,
+                        state: if ev.override_redirect {
+                            None
+                        } else {
+                            Some(ClientState {
+                                x: ev.x,
+                                y: ev.y,
+                                width: ev.width,
+                                height: ev.height,
+                                is_viewable: false,
+                            })
+                        },
+                    });
                 }
                 DestroyNotify(ev) => {
-                    self.clients.remove(&ev.window);
+                    if let Some(window) = self.focus {
+                        if window == ev.window {
+                            // Focus the first visible managed client that we can
+                            // find.
+                            for client in self.clients.iter().rev().skip(1) {
+                                if let Some(ref st) = client.state {
+                                    if st.is_viewable {
+                                        self.focus(client.window)?;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.clients.remove(ev.window);
                     // If we were dragging the window, stop dragging it.
                     if let Some(ref drag) = self.drag {
                         if drag.window == ev.window {
@@ -213,105 +268,107 @@ impl<Conn> OxWM<Conn> {
                 }
                 EnterNotify(ev) => {
                     let window = ev.event;
-                    if let FocusModel::Autofocus | FocusModel::Autoraise = self.config.focus_model {
+                    if let FocusModel::Autofocus = self.config.focus_model {
                         self.focus(window)?;
                     }
-                    if let FocusModel::Autoraise = self.config.focus_model {
-                        self.raise(window)?;
-                    }
+                }
+                FocusIn(ev) => {
+                    self.focus = Some(ev.event);
+                }
+                FocusOut(_) => {
+                    self.focus = None;
                 }
                 KeyPress(ev) => {
-                    // We're only listening for keycodes that are bound in the keybinds
-                    // map (anything else is a bug), so we can call unwrap() with a
-                    // clean conscience here.
                     let action = self.config.keybinds.get(&ev.detail).unwrap();
                     action(&mut self, ev.event)?;
+                }
+                MapNotify(ev) => {
+                    if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
+                        st.is_viewable = true;
+                    }
+                    self.focus = Some(ev.window);
                 }
                 MapRequest(ev) => {
                     self.manage(ev.window)?;
                     self.conn.map_window(ev.window)?.check()?
                 }
-                MotionNotify(ev) => match self.drag {
-                    None => log::error!("MotionNotify event without a drag."),
-                    Some(ref drag) => {
-                        let config = match drag.type_ {
-                            DragType::MOVE => {
-                                let x = (ev.root_x - drag.x) as i32;
-                                let y = (ev.root_y - drag.y) as i32;
-                                ConfigureWindowAux::new().x(x).y(y)
-                            }
-                            DragType::RESIZE(corner) => {
-                                // The client must still be in the map, since the event
-                                // we're processing now can't temporally succeed a
-                                // DestroyWindow event for the same window.
-                                let client = self.clients.get(&drag.window).unwrap();
-                                match corner {
-                                    Corner::LeftTop => {
-                                        let mut x = ev.root_x - drag.x;
-                                        let mut width =
-                                            client.width as i32 - ((x - client.x) as i32);
-                                        if width < MIN_WIDTH as i32 {
-                                            width = MIN_WIDTH as i32;
-                                            x = client.x;
-                                        }
-                                        let width = width as u32;
-                                        let x = x as i32;
-                                        let mut y = ev.root_y - drag.y;
-                                        let mut height =
-                                            client.height as i32 - ((y - client.y) as i32);
-                                        if height < MIN_HEIGHT as i32 {
-                                            height = MIN_HEIGHT as i32;
-                                            y = client.y;
-                                        }
-                                        let height = height as u32;
-                                        let y = y as i32;
-                                        ConfigureWindowAux::new()
-                                            .x(x)
-                                            .y(y)
-                                            .width(width)
-                                            .height(height)
+                MotionNotify(ev) => {
+                    let drag = self.drag.as_ref().unwrap();
+                    let config = match drag.type_ {
+                        DragType::MOVE => {
+                            let x = (ev.root_x - drag.x) as i32;
+                            let y = (ev.root_y - drag.y) as i32;
+                            ConfigureWindowAux::new().x(x).y(y)
+                        }
+                        DragType::RESIZE(corner) => {
+                            let st = self.clients.get_mut(ev.event).state.as_ref().unwrap();
+                            match corner {
+                                Corner::LeftTop => {
+                                    let mut x = ev.root_x - drag.x;
+                                    let mut width = st.width as i32 - ((x - st.x) as i32);
+                                    if width < MIN_WIDTH as i32 {
+                                        width = MIN_WIDTH as i32;
+                                        x = st.x;
                                     }
-                                    Corner::LeftBottom => {
-                                        let height =
-                                            ((ev.event_y - drag.y).max(0) as u32).max(MIN_HEIGHT);
-                                        let mut x = ev.root_x - drag.x;
-                                        let mut width =
-                                            client.width as i32 - ((x - client.x) as i32);
-                                        if width < MIN_WIDTH as i32 {
-                                            width = MIN_WIDTH as i32;
-                                            x = client.x;
-                                        }
-                                        let width = width as u32;
-                                        let x = x as i32;
-                                        ConfigureWindowAux::new().x(x).width(width).height(height)
+                                    let width = width as u32;
+                                    let x = x as i32;
+                                    let mut y = ev.root_y - drag.y;
+                                    let mut height = st.height as i32 - ((y - st.y) as i32);
+                                    if height < MIN_HEIGHT as i32 {
+                                        height = MIN_HEIGHT as i32;
+                                        y = st.y;
                                     }
-                                    Corner::RightTop => {
-                                        let width =
-                                            ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
-                                        let mut y = ev.root_y - drag.y;
-                                        let mut height =
-                                            client.height as i32 - ((y - client.y) as i32);
-                                        if height < MIN_HEIGHT as i32 {
-                                            height = MIN_HEIGHT as i32;
-                                            y = client.y;
-                                        }
-                                        let height = height as u32;
-                                        let y = y as i32;
-                                        ConfigureWindowAux::new().y(y).width(width).height(height)
+                                    let height = height as u32;
+                                    let y = y as i32;
+                                    ConfigureWindowAux::new()
+                                        .x(x)
+                                        .y(y)
+                                        .width(width)
+                                        .height(height)
+                                }
+                                Corner::LeftBottom => {
+                                    let height =
+                                        ((ev.event_y - drag.y).max(0) as u32).max(MIN_HEIGHT);
+                                    let mut x = ev.root_x - drag.x;
+                                    let mut width = st.width as i32 - ((x - st.x) as i32);
+                                    if width < MIN_WIDTH as i32 {
+                                        width = MIN_WIDTH as i32;
+                                        x = st.x;
                                     }
-                                    Corner::RightBottom => {
-                                        let width =
-                                            ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
-                                        let height =
-                                            ((ev.event_y - drag.y).max(0) as u32).max(MIN_WIDTH);
-                                        ConfigureWindowAux::new().width(width).height(height)
+                                    let width = width as u32;
+                                    let x = x as i32;
+                                    ConfigureWindowAux::new().x(x).width(width).height(height)
+                                }
+                                Corner::RightTop => {
+                                    let width =
+                                        ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
+                                    let mut y = ev.root_y - drag.y;
+                                    let mut height = st.height as i32 - ((y - st.y) as i32);
+                                    if height < MIN_HEIGHT as i32 {
+                                        height = MIN_HEIGHT as i32;
+                                        y = st.y;
                                     }
+                                    let height = height as u32;
+                                    let y = y as i32;
+                                    ConfigureWindowAux::new().y(y).width(width).height(height)
+                                }
+                                Corner::RightBottom => {
+                                    let width =
+                                        ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
+                                    let height =
+                                        ((ev.event_y - drag.y).max(0) as u32).max(MIN_WIDTH);
+                                    ConfigureWindowAux::new().width(width).height(height)
                                 }
                             }
-                        };
-                        self.conn.configure_window(drag.window, &config)?.check()?;
+                        }
+                    };
+                    self.conn.configure_window(drag.window, &config)?.check()?;
+                }
+                UnmapNotify(ev) => {
+                    if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
+                        st.is_viewable = false;
                     }
-                },
+                }
                 _ => log::warn!("Unhandled event!"),
             }
         }
@@ -358,14 +415,14 @@ impl<Conn> OxWM<Conn> {
     }
 
     fn begin_drag(&mut self, window: xproto::Window, button: xproto::Button, x: i16, y: i16) {
-        let client = self.clients.get(&window).unwrap();
+        let st = self.clients.get(window).state.as_ref().unwrap();
         let (type_, corner) = match button {
             1 => (DragType::MOVE, Corner::LeftTop),
             3 => {
                 // We resize from whatever corner the pointer is
                 // closest to.
-                let mid_x = (client.width / 2) as i16;
-                let mid_y = (client.height / 2) as i16;
+                let mid_x = (st.width / 2) as i16;
+                let mid_y = (st.height / 2) as i16;
                 let corner = match (x >= mid_x, y >= mid_y) {
                     (false, false) => Corner::LeftTop,
                     (false, true) => Corner::LeftBottom,
@@ -379,7 +436,7 @@ impl<Conn> OxWM<Conn> {
                 return;
             }
         };
-        let (cx, cy) = client.corner_rel(corner);
+        let (cx, cy) = corner.relative(st);
         let x = x - (cx as i16);
         let y = y - (cy as i16);
         self.drag = Some(Drag {
@@ -390,104 +447,85 @@ impl<Conn> OxWM<Conn> {
         });
     }
 
+    fn get_wm_name(&self, window: xproto::Window) -> Result<String>
+    where
+        Conn: Connection,
+    {
+        let bytes = self
+            .conn
+            .get_property_simple(window, xproto::AtomEnum::WM_NAME, xproto::AtomEnum::STRING)?
+            .reply()?
+            .value;
+        // TODO implement compound text decoding
+        Ok(String::from_utf8(bytes).unwrap())
+    }
+
+    /// Begin managing a window (usually in response to a MapRequest).
     fn manage(&mut self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        let cookie1 = self.conn.get_window_attributes(window);
-        let cookie2 = self.conn.get_geometry(window);
-        // Get WM_NAME.
-        let cookie3 = self.conn.get_property_simple(
-            window,
-            xproto::AtomEnum::WM_NAME,
-            xproto::AtomEnum::STRING,
-        );
         // Grab modifier + nothing.
         let nomod: u16 = 0;
         // TODO I don't fully understand sync/async grab modes.
-        let cookie4 = self.conn.grab_button(
-            true,
-            window,
-            event_mask_to_u16(xproto::EventMask::BUTTON_PRESS),
-            xproto::GrabMode::SYNC,
-            xproto::GrabMode::SYNC,
-            x11rb::NONE,
-            x11rb::NONE,
-            xproto::ButtonIndex::M1,
-            nomod,
-        );
+        self.conn
+            .grab_button(
+                true,
+                window,
+                event_mask_to_u16(xproto::EventMask::BUTTON_PRESS),
+                xproto::GrabMode::SYNC,
+                xproto::GrabMode::SYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                xproto::ButtonIndex::M1,
+                nomod,
+            )?
+            .check()?;
         // Grab modifier + left mouse button.
-        let cookie5 = self.conn.grab_button(
-            false,
-            window,
-            event_mask_to_u16(
-                xproto::EventMask::BUTTON_PRESS
-                    | xproto::EventMask::BUTTON_RELEASE
-                    | xproto::EventMask::POINTER_MOTION,
-            ),
-            xproto::GrabMode::ASYNC,
-            xproto::GrabMode::ASYNC,
-            x11rb::NONE,
-            x11rb::NONE,
-            xproto::ButtonIndex::M1,
-            self.config.mod_mask,
-        );
+        self.conn
+            .grab_button(
+                false,
+                window,
+                event_mask_to_u16(
+                    xproto::EventMask::BUTTON_PRESS
+                        | xproto::EventMask::BUTTON_RELEASE
+                        | xproto::EventMask::POINTER_MOTION,
+                ),
+                xproto::GrabMode::ASYNC,
+                xproto::GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                xproto::ButtonIndex::M1,
+                self.config.mod_mask,
+            )?
+            .check()?;
         // Grab modifier + right mouse button.
-        let cookie6 = self.conn.grab_button(
-            false,
-            window,
-            event_mask_to_u16(
-                xproto::EventMask::BUTTON_PRESS
-                    | xproto::EventMask::BUTTON_RELEASE
-                    | xproto::EventMask::POINTER_MOTION,
-            ),
-            xproto::GrabMode::ASYNC,
-            xproto::GrabMode::ASYNC,
-            x11rb::NONE,
-            x11rb::NONE,
-            xproto::ButtonIndex::M3,
-            self.config.mod_mask,
-        );
+        self.conn
+            .grab_button(
+                false,
+                window,
+                event_mask_to_u16(
+                    xproto::EventMask::BUTTON_PRESS
+                        | xproto::EventMask::BUTTON_RELEASE
+                        | xproto::EventMask::POINTER_MOTION,
+                ),
+                xproto::GrabMode::ASYNC,
+                xproto::GrabMode::ASYNC,
+                x11rb::NONE,
+                x11rb::NONE,
+                xproto::ButtonIndex::M3,
+                self.config.mod_mask,
+            )?
+            .check()?;
         // Set our desired event mask.
-        let cookie7 = self.conn.change_window_attributes(
-            window,
-            &xproto::ChangeWindowAttributesAux::new()
-                .event_mask(xproto::EventMask::ENTER_WINDOW | xproto::EventMask::PROPERTY_CHANGE),
-        );
-        // ...and put everything together at the end.]
-        match (
-            cookie1?.reply(),
-            cookie2?.reply(),
-            cookie3?.reply(),
-            cookie4?.check(),
-            cookie5?.check(),
-            cookie6?.check(),
-            cookie7?.check(),
-        ) {
-            (Ok(attrs), Ok(geom), Ok(prop_wm_name), Ok(_), Ok(_), Ok(_), Ok(_)) => {
-                if !attrs.override_redirect {
-                    // TODO Implement compound text decoding.
-                    let name = String::from_utf8(prop_wm_name.value).unwrap();
-                    log::debug!("Window name: {}.", name);
-                    self.clients.insert(
-                        window,
-                        Client {
-                            frame: 0,
-                            contents: 0,
-                            x: geom.x,
-                            y: geom.y,
-                            width: geom.width,
-                            height: geom.height,
-                            name,
-                        },
-                    );
-                }
-            }
-            err => log::warn!(
-                "Error while trying to manage the window (one of these): {:?}",
-                err
-            ),
-        }
+        self.conn
+            .change_window_attributes(
+                window,
+                &xproto::ChangeWindowAttributesAux::new().event_mask(
+                    xproto::EventMask::ENTER_WINDOW | xproto::EventMask::PROPERTY_CHANGE,
+                ),
+            )?
+            .check()?;
         Ok(())
     }
 
@@ -520,36 +558,7 @@ impl<Conn> OxWM<Conn> {
     }
 }
 
-#[derive(Clone, Debug)]
-struct Client {
-    /// The frame window.
-    frame: xproto::Window,
-    /// The "real" client window.
-    contents: xproto::Window,
-    /// Horizontal position.
-    x: i16,
-    /// Vertical position.
-    y: i16,
-    /// Horizontal extent.
-    width: u16,
-    /// Vertical extent.
-    height: u16,
-    /// Client name.
-    name: String,
-}
-
-impl Client {
-    fn corner_rel(&self, corner: Corner) -> (u16, u16) {
-        match corner {
-            Corner::LeftTop => (0, 0),
-            Corner::LeftBottom => (0, self.height),
-            Corner::RightTop => (self.width, 0),
-            Corner::RightBottom => (self.width, self.height),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 enum Corner {
     LeftTop,
     LeftBottom,
@@ -557,7 +566,18 @@ enum Corner {
     RightBottom,
 }
 
-#[derive(Clone, Debug)]
+impl Corner {
+    fn relative(&self, st: &ClientState) -> (i16, i16) {
+        match self {
+            Self::LeftTop => (0, 0),
+            Self::LeftBottom => (0, st.height as i16),
+            Self::RightTop => (st.width as i16, 0),
+            Self::RightBottom => (st.width as i16, st.height as i16),
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 enum DragType {
     MOVE,
     RESIZE(Corner),

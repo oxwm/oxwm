@@ -57,8 +57,6 @@ pub enum FocusModel {
     Click,
     /// Focus follows mouse.
     Autofocus,
-    /// Focus follows mouse, and windows come to the front when focused.
-    Autoraise,
 }
 
 /// Type of "raw" configs, straight from the source.
