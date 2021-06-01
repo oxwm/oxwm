@@ -18,9 +18,9 @@ use ext::conn::*;
 use util::*;
 
 /// Minimum client width.
-const MIN_WIDTH: u32 = 256;
+const MIN_WIDTH: u32 = 128;
 /// Minimum client height.
-const MIN_HEIGHT: u32 = 256;
+const MIN_HEIGHT: u32 = 128;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
 /// anything with errors other than letting them bubble up to the user, so this
@@ -280,7 +280,7 @@ impl<Conn> OxWM<Conn> {
                 }
                 KeyPress(ev) => {
                     let action = self.config.keybinds.get(&ev.detail).unwrap();
-                    action(&mut self, ev.event)?;
+                    action(&mut self, ev.child)?;
                 }
                 MapNotify(ev) => {
                     if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
