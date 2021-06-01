@@ -18,9 +18,9 @@ use ext::conn::*;
 use util::*;
 
 /// Minimum client width.
-const MIN_WIDTH: u32 = 128;
+const MIN_WIDTH: u32 = 256;
 /// Minimum client height.
-const MIN_HEIGHT: u32 = 128;
+const MIN_HEIGHT: u32 = 256;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
 /// anything with errors other than letting them bubble up to the user, so this
@@ -36,8 +36,6 @@ pub(crate) struct OxWM<Conn> {
     config: Config<Conn>,
     /// Local client data.
     clients: Clients,
-    /// The currently-focused window.
-    focus: Option<xproto::Window>,
     /// "Keep going" flag. If this is set to `false` at the start of the event
     /// loop, the window manager will stop running.
     keep_going: bool,
@@ -58,12 +56,12 @@ impl<Conn> OxWM<Conn> {
         // Load the config file first, since this is where errors are most
         // likely to occur.
         let config = Config::load()?;
+        let clients = Clients::new(&conn, screen)?;
         let mut ret = OxWM {
             conn,
             screen,
             config,
-            clients: Clients::new(),
-            focus: None,
+            clients,
             keep_going: true,
             drag: None,
         };
@@ -115,23 +113,8 @@ impl<Conn> OxWM<Conn> {
         Conn: Connection,
     {
         log::debug!("Managing extant clients.");
-        let children = self.conn.query_tree(self.root())?.reply()?.children;
-        for window in children {
-            let attrs = self.conn.get_window_attributes(window)?.reply()?;
-            let state = if attrs.override_redirect {
-                None
-            } else {
-                let geom = self.conn.get_geometry(window)?.reply()?;
-                Some(ClientState {
-                    x: geom.x,
-                    y: geom.y,
-                    width: geom.width,
-                    height: geom.height,
-                    is_viewable: attrs.map_state == xproto::MapState::VIEWABLE,
-                })
-            };
-            self.clients.push(Client { window, state });
-            self.manage(window)?;
+        for client in self.clients.iter() {
+            self.manage(client.window)?;
         }
         Ok(())
     }
@@ -223,9 +206,10 @@ impl<Conn> OxWM<Conn> {
                         value_list.width = value_list.width.map(|w| w.max(MIN_WIDTH));
                         value_list.height = value_list.height.map(|h| h.max(MIN_HEIGHT));
                     }
-                    self.conn
-                        .configure_window(ev.window, &value_list)?
-                        .check()?;
+                    if let Err(e) = self.conn.configure_window(ev.window, &value_list)?.check() {
+                        // The window might have already been destroyed!
+                        log::warn!("{:?}", e);
+                    }
                 }
                 CreateNotify(ev) => {
                     self.clients.push(Client {
@@ -244,8 +228,8 @@ impl<Conn> OxWM<Conn> {
                     });
                 }
                 DestroyNotify(ev) => {
-                    if let Some(window) = self.focus {
-                        if window == ev.window {
+                    if let Some(client) = self.clients.get_focus() {
+                        if client.window == ev.window {
                             // Focus the first visible managed client that we can
                             // find.
                             for client in self.clients.iter().rev().skip(1) {
@@ -273,10 +257,10 @@ impl<Conn> OxWM<Conn> {
                     }
                 }
                 FocusIn(ev) => {
-                    self.focus = Some(ev.event);
+                    self.clients.set_focus(ev.event);
                 }
                 FocusOut(_) => {
-                    self.focus = None;
+                    self.clients.set_focus(None);
                 }
                 KeyPress(ev) => {
                     let action = self.config.keybinds.get(&ev.detail).unwrap();
@@ -286,7 +270,7 @@ impl<Conn> OxWM<Conn> {
                     if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
                         st.is_viewable = true;
                     }
-                    self.focus = Some(ev.window);
+                    self.clients.set_focus(ev.window);
                 }
                 MapRequest(ev) => {
                     self.manage(ev.window)?;
@@ -461,7 +445,7 @@ impl<Conn> OxWM<Conn> {
     }
 
     /// Begin managing a window (usually in response to a MapRequest).
-    fn manage(&mut self, window: xproto::Window) -> Result<()>
+    fn manage(&self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {

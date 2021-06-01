@@ -27,11 +27,16 @@ won't run.
 After you've configured the program, you'll want to make your `/.xinitrc` look
 something like this:
 
-``` sh
+```sh
 xsetroot -cursor_name left_ptr &
 pushd $OXWM_DIRECTORY # wherever you've cloned the source to
-cargo run > log 2>&1
+cargo install --path .
 popd
+exec oxwm >~/.Xoutput 2>&1
 ```
 
 Then, from a TTY, just type `startx`.
+
+Note: we currently log every single event we receive, which can seriously impact
+performance. You can probably improve performance by simply not redirecting the
+log to a file.

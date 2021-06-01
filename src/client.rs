@@ -1,4 +1,8 @@
+use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
+use x11rb::protocol::xproto::ConnectionExt;
+
+use crate::Result;
 
 /// Local data about a top-level window.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
@@ -33,13 +37,19 @@ pub(crate) struct ClientState {
     pub(crate) is_viewable: bool,
 }
 
-/// An abstraction for managing local (cached) client state. This keeps track of
-/// which clients are currently managed, as well as their stacking order.
+/// Local data about the state of all top-level windows. This includes windows
+/// that have the override-redirect flag set, although we don't do anything
+/// other than keep track of their stacking order and whether they're focused.
 ///
-/// The user is responsible for checking invariants. In particular, it is an
-/// error to try to insert two clients with the same window ID, and it is an
-/// error to try to perform an operation on a window ID for which there is no
-/// corresponding client.
+/// You can essentially think of this as a simulator for a tiny subset of the X
+/// protocol. The point is that keeping track of the state of the server lets us
+/// use our own knowledge when making decisions, rather than having to
+/// constantly issue queries.
+///
+/// The user is responsible for the following.
+/// * It is an error to try to insert two clients with the same window ID.
+/// * It is an error to try to perform an operation on a window ID for which
+///   there is no corresponding client.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub(crate) struct Clients {
     // It feels wrong to use a vector, since we're going to be inserting and
@@ -48,9 +58,34 @@ pub(crate) struct Clients {
     // Rust's standard linked list type doesn't even have insert/remove
     // methods).
     stack: Vec<Client>,
+    focus: Option<xproto::Window>,
 }
 
 impl Clients {
+    /// Get the currently-focused client.
+    pub(crate) fn get_focus(&self) -> Option<&Client> {
+        let window = self.focus?;
+        Some(self.get(window))
+    }
+
+    /// Get the currently-focused client.
+    pub(crate) fn get_focus_mut(&mut self) -> Option<&mut Client> {
+        let window = self.focus?;
+        Some(self.get_mut(window))
+    }
+
+    /// Set the currently-focused client.
+    pub(crate) fn set_focus<A>(&mut self, window: A)
+    where
+        A: Into<Option<xproto::Window>>,
+    {
+        let window = window.into();
+        debug_assert!(window
+            .map(|w| self.stack.iter().any(|c| c.window == w))
+            .unwrap_or(true));
+        self.focus = window;
+    }
+
     /// Get a client by its window.
     pub(crate) fn get(&self, window: xproto::Window) -> &Client {
         self.get_with_index(window).1
@@ -59,11 +94,6 @@ impl Clients {
     /// Get a client by its window.
     pub(crate) fn get_mut(&mut self, window: xproto::Window) -> &mut Client {
         self.get_with_index_mut(window).1
-    }
-
-    /// Determine whether the stack is empty.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.stack.is_empty()
     }
 
     /// Get an iterator over the stack, from bottom to top.
@@ -76,9 +106,37 @@ impl Clients {
         self.stack.iter_mut()
     }
 
-    /// Create a new, empty client stack.
-    pub(crate) fn new() -> Clients {
-        Clients { stack: Vec::new() }
+    /// Initialize a new client stack by issuing queries to the server.
+    pub(crate) fn new<Conn>(conn: &Conn, screen: usize) -> Result<Self>
+    where
+        Conn: Connection,
+    {
+        let root = conn.setup().roots[screen].root;
+        let mut stack = Vec::new();
+        let children = conn.query_tree(root)?.reply()?.children;
+        for window in children {
+            let attrs = conn.get_window_attributes(window)?.reply()?;
+            let state = if attrs.override_redirect {
+                None
+            } else {
+                let geom = conn.get_geometry(window)?.reply()?;
+                Some(ClientState {
+                    x: geom.x,
+                    y: geom.y,
+                    width: geom.width,
+                    height: geom.height,
+                    is_viewable: attrs.map_state == xproto::MapState::VIEWABLE,
+                })
+            };
+            stack.push(Client { window, state })
+        }
+        let focus = conn.get_input_focus()?.reply()?.focus;
+        let focus = if focus == x11rb::NONE || focus == root {
+            None
+        } else {
+            Some(focus)
+        };
+        Ok(Clients { stack, focus })
     }
 
     /// Push a client on top of the stack.
@@ -89,6 +147,7 @@ impl Clients {
 
     /// Remove a client from the stack.
     pub(crate) fn remove(&mut self, window: xproto::Window) {
+        let (i, _) = self.get_with_index(window);
         self.stack.remove(self.get_with_index(window).0);
     }
 
@@ -103,7 +162,7 @@ impl Clients {
         self.stack.insert(j + 1, client);
     }
 
-    /// Lower a client to the botton of the stack.
+    /// Lower a client to the bottom of the stack.
     pub(crate) fn to_bottom(&mut self, window: xproto::Window) {
         if self.stack.first().unwrap().window == window {
             return;
