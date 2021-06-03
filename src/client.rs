@@ -150,21 +150,20 @@ impl Clients {
         let (i, _) = self.get_with_index(window);
         self.stack.remove(self.get_with_index(window).0);
 
-        let next_focus = if self.focus? == window {
-            // Change focus to the first visible managed client that we can
-            // find when the currently focused window is removed..
-            self.stack.iter().rev().skip(1).find(|c| {
+        if self.focus? == window {
+            // When the currently focused window is removed change focus
+            // to the first visible managed client that we can find.
+            let next_focus = self.stack.iter().rev().find(|c| {
                 if let Some(ref st) = c.state {
                     st.is_viewable
                 } else {
                     false
                 }
-            })
-        } else {
-            None
-        };
-
-        next_focus.map(|c| c.window)
+            });
+            self.focus = Some(next_focus.unwrap().window);
+            return self.focus;
+        }
+        None
     }
 
     /// Move a client to just above another one.
@@ -223,4 +222,66 @@ impl Clients {
             .find(|(_, c)| c.window == window)
             .unwrap()
     }
+}
+
+///Tests
+#[test]
+fn can_remove_focused_window() {
+    let mut clients = Clients {
+        stack: vec![],
+        focus: None,
+    };
+
+    clients.push(Client {
+        window: 100,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+        }),
+    });
+
+    clients.push(Client {
+        window: 200,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+        }),
+    });
+
+    clients.push(Client {
+        window: 250,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: false,
+        }),
+    });
+
+    clients.push(Client {
+        window: 300,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+        }),
+    });
+
+    clients.set_focus(300);
+    assert_eq!(clients.get_focus().unwrap().window, 300);
+
+    assert!(clients.remove(100).is_none());
+    assert_eq!(clients.get_focus().unwrap().window, 300);
+
+    assert_eq!(clients.remove(300).unwrap(), 200);
+    assert_eq!(clients.get_focus().unwrap().window, 200);
 }

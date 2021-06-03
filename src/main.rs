@@ -228,9 +228,10 @@ impl<Conn> OxWM<Conn> {
                     });
                 }
                 DestroyNotify(ev) => {
-                    if let Some(new_focus_target) = self.clients.remove(ev.window) {
-                        self.focus(new_focus_target)?;
-                    }
+                    let new_focus_target = self.clients.remove(ev.window);
+                    //If we removed the focused window, have server change focus
+                    //to the window selected by clients.remove()
+                    new_focus_target.map(|window| -> Result<()> { self.focus(window) });
 
                     // If we were dragging the window, stop dragging it.
                     if let Some(ref drag) = self.drag {
