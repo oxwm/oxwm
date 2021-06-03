@@ -228,21 +228,28 @@ impl<Conn> OxWM<Conn> {
                     });
                 }
                 DestroyNotify(ev) => {
-                    if let Some(client) = self.clients.get_focus() {
+/*                    if let Some(client) = self.clients.get_focus() {
                         if client.window == ev.window {
                             // Focus the first visible managed client that we can
                             // find.
                             for client in self.clients.iter().rev().skip(1) {
                                 if let Some(ref st) = client.state {
-                                    if st.is_viewable {
+                                    if st.is_viewable && client.window != ev.window{
                                         self.focus(client.window)?;
+                                        //DEBUG
+                                            log::info!("---!--- Focusing on {}",client.window);
+                                        //END DEBUG
                                         break;
                                     }
                                 }
                             }
                         }
-                    }
-                    self.clients.remove(ev.window);
+                    }*/
+                    let new_focus_target= self.clients.remove(ev.window);
+                    //Not permitted, mutable borrow ^^, shared  borow vvv
+                    /*if new_focus_target.is_some(){
+                                        self.focus(new_focus_target.unwrap().window)?;
+                    }*/
                     // If we were dragging the window, stop dragging it.
                     if let Some(ref drag) = self.drag {
                         if drag.window == ev.window {
@@ -381,6 +388,9 @@ impl<Conn> OxWM<Conn> {
                 x11rb::CURRENT_TIME,
             )?
             .check()?;
+        //DEBUG
+            //self.clients.set_focus(window);
+        //END DEBUG
         Ok(())
     }
 

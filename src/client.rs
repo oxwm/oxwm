@@ -65,6 +65,9 @@ impl Clients {
     /// Get the currently-focused client.
     pub(crate) fn get_focus(&self) -> Option<&Client> {
         let window = self.focus?;
+        //DEBUG
+            log::info!("---!--- Get focus found id {} ---!---", window); 
+        //END DEBUG
         Some(self.get(window))
     }
 
@@ -83,7 +86,11 @@ impl Clients {
         debug_assert!(window
             .map(|w| self.stack.iter().any(|c| c.window == w))
             .unwrap_or(true));
+        //DEBUG
+            log::info!("---!--- Clients now focusing: {:?}", window);
+        //END DEBUG
         self.focus = window;
+
     }
 
     /// Get a client by its window.
@@ -146,9 +153,38 @@ impl Clients {
     }
 
     /// Remove a client from the stack.
-    pub(crate) fn remove(&mut self, window: xproto::Window) {
+    pub(crate) fn remove(&mut self, window: xproto::Window) -> Option<&Client> {
+        
         let (i, _) = self.get_with_index(window);
         self.stack.remove(self.get_with_index(window).0);
+
+        let next_focus = if self.focus? == window {
+            // Removing the currently focused window.
+            // Focus the first visible managed client that we can
+            // find. 
+            //
+
+            {
+            self.stack.iter()
+                                 .rev()
+                                 .skip(1)
+                                 .find(|c| {
+                    if let Some(ref st) = c.state {
+                        if st.is_viewable && c.window != window{
+                            return true
+                        }
+                    }
+
+                    return false
+
+                })
+            } 
+        }
+        else
+        {
+            None
+        };
+        next_focus
     }
 
     /// Move a client to just above another one.
