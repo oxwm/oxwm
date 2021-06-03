@@ -160,7 +160,8 @@ impl Clients {
                     false
                 }
             });
-            self.focus = Some(next_focus.unwrap().window);
+
+            self.focus = next_focus.map(|c| c.window);
             return self.focus;
         }
         None
@@ -284,4 +285,10 @@ fn can_remove_focused_window() {
 
     assert_eq!(clients.remove(300).unwrap(), 200);
     assert_eq!(clients.get_focus().unwrap().window, 200);
+
+    assert!(clients.remove(250).is_none());
+    assert_eq!(clients.get_focus().unwrap().window, 200);
+
+    //If no viewable windows are left after removing the focused window, may return none
+    assert!(clients.remove(200).is_none());
 }
