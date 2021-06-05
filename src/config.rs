@@ -97,6 +97,7 @@ pub(crate) struct Config<Conn> {
     pub(crate) mod_mask: xproto::ModMask,
     pub(crate) focus_model: FocusModel,
     pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
+    pub(crate) keybind_names: HashMap<xproto::Keycode, String>,
 }
 
 #[derive(
@@ -117,14 +118,7 @@ impl<Conn> Config<Conn> {
         let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
         path.push("oxwm");
         path.push("config.toml");
-        Self::from_path(&path).or_else(|_| {
-            log::info!("Applying default configuration.");
-            let default_config = Self::new()?;
-            let strc = toml::to_string(&default_config);
-            log::debug!("Heeere's jonny!\nvvv\n{}\n^^^",strc.unwrap());
-
-            Ok(default_config)
-        })
+        Self::from_path(&path)
     }
 
     /// Load a specified config file.
@@ -146,7 +140,7 @@ impl<Conn> Config<Conn> {
 
     /// Instantiate a default config which opens an xterm at startup, changes
     /// focus on mouse click, terminates programs with Mod4 + w, and exits with Mod4 + Q.
-    fn new() -> Result<Self>
+    pub fn new() -> Self
     where
         Conn: Connection,
     {
@@ -154,15 +148,19 @@ impl<Conn> Config<Conn> {
         let mod_mask = ModMask::Mod4.into();
         let focus_model = FocusModel::Click;
         let mut keybinds: HashMap<xproto::Keycode, Action<Conn>> = HashMap::new();
+        let mut keybind_names: HashMap<xproto::Keycode, String> = HashMap::new();
         keybinds.insert(24, OxWM::poison); //Q
+        keybind_names.insert(24, "quit".to_string());
         keybinds.insert(25, OxWM::kill_focused_client); //W
+        keybind_names.insert(25, "kill".to_string());
 
-        Ok(Self {
+        Self {
             startup,
             mod_mask,
             focus_model,
             keybinds,
-        })
+            keybind_names,
+        }
     }
 }
 
@@ -185,6 +183,7 @@ where
         let mod_mask = raw.mod_mask.unwrap_or(ModMask::Mod4).into();
         let focus_model = raw.focus_model.unwrap_or(FocusModel::Click);
         let mut keybinds = HashMap::new();
+        let mut keybind_names = HashMap::new();
         for (keycode, action_name) in raw.keybinds.unwrap_or_default() {
             let keycode = keycode.parse::<u8>().map_err(KeycodeError)?;
             let action: Result<Action<Conn>> = match action_name.as_str() {
@@ -193,12 +192,14 @@ where
                 _ => Err(Box::new(ActionError(action_name.clone()))),
             };
             keybinds.insert(keycode, action?);
+            keybind_names.insert(keycode, action_name);
         }
         Ok(Self {
             startup,
             mod_mask,
             focus_model,
             keybinds,
+            keybind_names,
         })
     }
 }
@@ -226,11 +227,20 @@ where
     where
         S: Serializer,
     {
-        let mut output = serializer.serialize_struct("Config", 3)?;
-        output.serialize_field("startup", &self.startup);
-        output.serialize_field("mod_mask", &ModMask::from(&self.mod_mask));
-        output.serialize_field("focus_model", &self.focus_model);
-        //output.serialize_field("keybinds", &self.keybinds);
+        let mut output = serializer.serialize_struct("Config", 4)?;
+        output.serialize_field("startup", &self.startup)?;
+        output.serialize_field("mod_mask", &ModMask::from(&self.mod_mask))?;
+        output.serialize_field("focus_model", &self.focus_model)?;
+
+        // Omit serializing self.keybinds directly: not trivial to convert from
+        // Action<Conn> to the strings they would be named by in a config.toml file.
+        // Use the corresponding strings mapped in self.keybind_names instead.
+        // Additionally toml::ser requires that keys for map types be Strings
+        // instead of integer types like xproto::Keycode. Convert to String first.
+        let keybind_names_by_string: HashMap<String, &String> = self.keybind_names.iter().map(|(k,v)| {
+            (k.to_string(),v) 
+        }).collect();
+        output.serialize_field("keybinds", &keybind_names_by_string)?;
         output.end()
     }
 }
