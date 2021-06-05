@@ -96,7 +96,10 @@ impl<Conn> Config<Conn> {
         let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
         path.push("oxwm");
         path.push("config.toml");
-        Self::from_path(&path)
+        Self::from_path(&path).or_else(|_| {
+            log::info!("Applying default configuration.");
+            Self::new()
+        })
     }
 
     /// Load a specified config file.
@@ -114,6 +117,27 @@ impl<Conn> Config<Conn> {
         Conn: Connection,
     {
         toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)
+    }
+
+    /// Instantiate a default config which opens an xterm at startup, changes
+    /// focus on mouse click, terminates programs with mod4+e, and exits with mod4+q.
+    fn new() -> Result<Self>
+    where
+        Conn: Connection,
+    {
+        let startup: Vec<String> = vec!["xterm".to_string()];
+        let mod_mask = ModMask::Mod4.into();
+        let focus_model = FocusModel::Click;
+        let mut keybinds: HashMap<xproto::Keycode, Action<Conn>> = HashMap::new();
+        keybinds.insert(24, OxWM::poison);
+        keybinds.insert(25, OxWM::kill_focused_client);
+
+        Ok(Self {
+            startup,
+            mod_mask,
+            focus_model,
+            keybinds,
+        })
     }
 }
 
