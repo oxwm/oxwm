@@ -58,12 +58,7 @@ impl<Conn> OxWM<Conn> {
         let config = Config::load().or_else(|_| -> Result<Config<Conn>> {
             log::info!("Applying default configuration.");
             let default_config = Config::new();
-
-            // In the future we may want to write this config to disk, 
-            // for now just output what it would be to stdout.
-            let serialized_config = toml::to_string(&default_config);
-            log::debug!("Default config file contents:\nvvv\n{}^^^",serialized_config?);
-
+            default_config.save()?;
             Ok(default_config)
         })?;
         let clients = Clients::new(&conn, screen)?;

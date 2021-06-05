@@ -7,11 +7,11 @@ use std::fs;
 use std::path::Path;
 use std::{collections::HashMap, num::ParseIntError};
 
+use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
-use serde::ser::SerializeStruct;
 
 use thiserror::Error;
 
@@ -55,20 +55,19 @@ impl From<ModMask> for xproto::ModMask {
 
 impl ModMask {
     fn from(xm: &xproto::ModMask) -> Self {
-        match xm {
-            &xproto::ModMask::SHIFT => ModMask::Shift,
-            &xproto::ModMask::LOCK => ModMask::Lock,
-            &xproto::ModMask::CONTROL => ModMask::Control,
-            &xproto::ModMask::M1 => ModMask::Mod1,
-            &xproto::ModMask::M2 => ModMask::Mod2,
-            &xproto::ModMask::M3 => ModMask::Mod3,
-            &xproto::ModMask::M4 => ModMask::Mod4,
-            &xproto::ModMask::M5 => ModMask::Mod5,
+        match *xm {
+            xproto::ModMask::SHIFT => ModMask::Shift,
+            xproto::ModMask::LOCK => ModMask::Lock,
+            xproto::ModMask::CONTROL => ModMask::Control,
+            xproto::ModMask::M1 => ModMask::Mod1,
+            xproto::ModMask::M2 => ModMask::Mod2,
+            xproto::ModMask::M3 => ModMask::Mod3,
+            xproto::ModMask::M4 => ModMask::Mod4,
+            xproto::ModMask::M5 => ModMask::Mod5,
             _ => ModMask::Any,
         }
     }
 }
-
 
 /// Focus model.
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Debug, Deserialize, Serialize)]
@@ -105,6 +104,14 @@ pub(crate) struct Config<Conn> {
 )]
 #[error("unsupported platform (I don't know where to look for your config file)")]
 pub(crate) struct UnsupportedPlatformError;
+
+#[derive(Clone, Copy, Debug, Error, Deserialize, Serialize)]
+#[error("Unable to create oxwm's configuration directory.")]
+pub(crate) struct CannotMakeConfigDirError;
+
+#[derive(Clone, Copy, Debug, Error, Deserialize, Serialize)]
+#[error("Unable to access your user's configuration directory.")]
+pub(crate) struct ConfigDirAccessError;
 
 impl<Conn> Config<Conn> {
     /// Load the config file, or return a default config object if there is no
@@ -161,6 +168,43 @@ impl<Conn> Config<Conn> {
             keybinds,
             keybind_names,
         }
+    }
+
+    /// Write the config in .toml format to the default location:
+    /// `<config directory>/oxwm/config.toml`
+    /// Jwhere `config_directory` is the location returned by `dirs::config_dir()`.
+    /// Will create the `oxwm` directory if needed, will not create `config_directory`
+    pub fn save(&self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        //TODO Need to ensure config_dir also works on unix platforms.
+        let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
+
+        //Fail if user configuration directory is not usable.
+        //TODO do we want to actually make this directory if it is missing?
+        if !path.is_dir() {
+            return Err(Box::new(ConfigDirAccessError));
+        };
+
+        //Check if oxwm directory is usable, attempt to create it if not.
+        path.push("oxwm");
+        if !path.is_dir() {
+            if path.exists() {
+                //Something is there, but we cannot access it or it isn't a directory.
+                return Err(Box::new(CannotMakeConfigDirError));
+            } else {
+                fs::create_dir(&path)?;
+                log::info!("Created directory {}.", path.display());
+            }
+        }
+
+        //Create or overwrite existing config.toml
+        path.push("config.toml");
+        fs::write(&path, toml::to_string(&self)?)?;
+        log::info!("Saved configuration file to {}.", path.display());
+
+        Ok(())
     }
 }
 
@@ -237,9 +281,11 @@ where
         // Use the corresponding strings mapped in self.keybind_names instead.
         // Additionally toml::ser requires that keys for map types be Strings
         // instead of integer types like xproto::Keycode. Convert to String first.
-        let keybind_names_by_string: HashMap<String, &String> = self.keybind_names.iter().map(|(k,v)| {
-            (k.to_string(),v) 
-        }).collect();
+        let keybind_names_by_string: HashMap<String, &String> = self
+            .keybind_names
+            .iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
         output.serialize_field("keybinds", &keybind_names_by_string)?;
         output.end()
     }
