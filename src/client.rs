@@ -146,25 +146,12 @@ impl Clients {
     }
 
     /// Remove a client from the stack.
-    pub(crate) fn remove(&mut self, window: xproto::Window) -> Option<xproto::Window> {
+    pub(crate) fn remove(&mut self, window: xproto::Window) {
         let (i, _) = self.get_with_index(window);
         self.stack.remove(self.get_with_index(window).0);
-
-        if self.focus? == window {
-            // When the currently focused window is removed change focus
-            // to the first visible managed client that we can find.
-            let next_focus = self.stack.iter().rev().find(|c| {
-                if let Some(ref st) = c.state {
-                    st.is_viewable
-                } else {
-                    false
-                }
-            });
-
-            self.focus = next_focus.map(|c| c.window);
-            return self.focus;
+        if self.focus == Some(window) {
+            self.focus = None;
         }
-        None
     }
 
     /// Move a client to just above another one.
@@ -280,15 +267,16 @@ fn can_remove_focused_window() {
     clients.set_focus(300);
     assert_eq!(clients.get_focus().unwrap().window, 300);
 
-    assert!(clients.remove(100).is_none());
+    clients.remove(100);
     assert_eq!(clients.get_focus().unwrap().window, 300);
 
-    assert_eq!(clients.remove(300).unwrap(), 200);
+    clients.remove(300);
+    assert!(clients.get_focus().is_none());
+
+    clients.set_focus(200);
+    clients.remove(250);
     assert_eq!(clients.get_focus().unwrap().window, 200);
 
-    assert!(clients.remove(250).is_none());
-    assert_eq!(clients.get_focus().unwrap().window, 200);
-
-    //If no viewable windows are left after removing the focused window, may return none
-    assert!(clients.remove(200).is_none());
+    clients.remove(200);
+    assert!(clients.get_focus().is_none());
 }

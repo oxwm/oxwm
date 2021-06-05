@@ -228,11 +228,21 @@ impl<Conn> OxWM<Conn> {
                     });
                 }
                 DestroyNotify(ev) => {
-                    let new_focus_target = self.clients.remove(ev.window);
-                    //If we removed the focused window, have server change focus
-                    //to the window selected by clients.remove()
-                    new_focus_target.map(|window| -> Result<()> { self.focus(window) });
-
+                    if let Some(client) = self.clients.get_focus() {
+                        if client.window == ev.window {
+                            // Focus the first visible managed client that we can
+                            // find.
+                            for client in self.clients.iter().rev().skip(1) {
+                                if let Some(ref st) = client.state {
+                                    if st.is_viewable {
+                                        self.focus(client.window)?;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.clients.remove(ev.window);
                     // If we were dragging the window, stop dragging it.
                     if let Some(ref drag) = self.drag {
                         if drag.window == ev.window {
