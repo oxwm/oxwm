@@ -10,6 +10,8 @@ use std::{collections::HashMap, num::ParseIntError};
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
+use serde::ser::SerializeStruct;
 
 use thiserror::Error;
 
@@ -32,6 +34,7 @@ enum ModMask {
     Mod3,
     Mod4,
     Mod5,
+    Any,
 }
 
 impl From<ModMask> for xproto::ModMask {
@@ -45,9 +48,27 @@ impl From<ModMask> for xproto::ModMask {
             ModMask::Mod3 => xproto::ModMask::M3,
             ModMask::Mod4 => xproto::ModMask::M4,
             ModMask::Mod5 => xproto::ModMask::M5,
+            ModMask::Any => xproto::ModMask::ANY,
         }
     }
 }
+
+impl ModMask {
+    fn from(xm: &xproto::ModMask) -> Self {
+        match xm {
+            &xproto::ModMask::SHIFT => ModMask::Shift,
+            &xproto::ModMask::LOCK => ModMask::Lock,
+            &xproto::ModMask::CONTROL => ModMask::Control,
+            &xproto::ModMask::M1 => ModMask::Mod1,
+            &xproto::ModMask::M2 => ModMask::Mod2,
+            &xproto::ModMask::M3 => ModMask::Mod3,
+            &xproto::ModMask::M4 => ModMask::Mod4,
+            &xproto::ModMask::M5 => ModMask::Mod5,
+            _ => ModMask::Any,
+        }
+    }
+}
+
 
 /// Focus model.
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Debug, Deserialize, Serialize)]
@@ -98,7 +119,11 @@ impl<Conn> Config<Conn> {
         path.push("config.toml");
         Self::from_path(&path).or_else(|_| {
             log::info!("Applying default configuration.");
-            Self::new()
+            let default_config = Self::new()?;
+            let strc = toml::to_string(&default_config);
+            log::debug!("Heeere's jonny!\nvvv\n{}\n^^^",strc.unwrap());
+
+            Ok(default_config)
         })
     }
 
@@ -120,7 +145,7 @@ impl<Conn> Config<Conn> {
     }
 
     /// Instantiate a default config which opens an xterm at startup, changes
-    /// focus on mouse click, terminates programs with mod4+e, and exits with mod4+q.
+    /// focus on mouse click, terminates programs with Mod4 + w, and exits with Mod4 + Q.
     fn new() -> Result<Self>
     where
         Conn: Connection,
@@ -129,8 +154,8 @@ impl<Conn> Config<Conn> {
         let mod_mask = ModMask::Mod4.into();
         let focus_model = FocusModel::Click;
         let mut keybinds: HashMap<xproto::Keycode, Action<Conn>> = HashMap::new();
-        keybinds.insert(24, OxWM::poison);
-        keybinds.insert(25, OxWM::kill_focused_client);
+        keybinds.insert(24, OxWM::poison); //Q
+        keybinds.insert(25, OxWM::kill_focused_client); //W
 
         Ok(Self {
             startup,
@@ -190,5 +215,22 @@ where
         Self::try_from(raw).map_err(|action_name| {
             <D::Error as serde::de::Error>::custom(format!("unknown action {}", action_name))
         })
+    }
+}
+
+impl<Conn> Serialize for Config<Conn>
+where
+    Conn: Connection,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut output = serializer.serialize_struct("Config", 3)?;
+        output.serialize_field("startup", &self.startup);
+        output.serialize_field("mod_mask", &ModMask::from(&self.mod_mask));
+        output.serialize_field("focus_model", &self.focus_model);
+        //output.serialize_field("keybinds", &self.keybinds);
+        output.end()
     }
 }
