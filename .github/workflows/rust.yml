@@ -17,7 +17,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: install libxcb-utils
-      run: sudo apt-get install -y libxcb-util
+      run: sudo apt-get install -y libxcb-keysyms1
     - name: Build
       run: cargo build --verbose
     - name: Run tests
