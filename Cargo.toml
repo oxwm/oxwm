@@ -14,3 +14,6 @@ simple_logger = "1"
 thiserror = "1"
 toml = "0.5.8"
 x11rb = "0.8.1"
+xcb = "0.9"
+xcb-util = { version = "0.3", features = ["keysyms"] }
+libc = "0.2.95"

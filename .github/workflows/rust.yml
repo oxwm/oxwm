@@ -16,8 +16,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
-    - name: install libxcb-utils
+    - name: install libxcb-dependencies
       run: sudo apt-get install -y libxcb-keysyms1
+    - name: add mising library symlink
+      run: sudo ln -s /usr/lib/x86_64-linux-gnu/libxcb-keysyms.so.1 /usr/lib/x86_64-linux-gnu/libxcb-keysyms.so
     - name: Build
       run: cargo build --verbose
     - name: Run tests
