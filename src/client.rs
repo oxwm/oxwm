@@ -1,7 +1,8 @@
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
-use x11rb::protocol::xproto::ConnectionExt;
+use x11rb::protocol::xproto::ConnectionExt as _;
 
+use crate::atom::*;
 use crate::Result;
 
 /// Local data about a top-level window.
@@ -15,15 +16,14 @@ pub(crate) struct Client {
 }
 
 impl Client {
-    /// Indicates whether a window is managed---that is, whether its
-    /// override-redirect flag is not set.
-    pub(crate) fn is_managed(&self) -> bool {
+    /// Indicates whether a window has its override-redirect flag set.
+    pub(crate) fn override_redirect(&self) -> bool {
         self.state.is_some()
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 /// Local data about the state of a top-level window.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub(crate) struct ClientState {
     /// Horizontal position.
     pub(crate) x: i16,
@@ -33,13 +33,16 @@ pub(crate) struct ClientState {
     pub(crate) width: u16,
     /// Vertical extent.
     pub(crate) height: u16,
-    /// Whether the window is currently viewable.
+    /// Whether the window is viewable.
     pub(crate) is_viewable: bool,
+    /// WM_PROTOCOLS.
+    pub(crate) wm_protocols: WmProtocols,
 }
 
 /// Local data about the state of all top-level windows. This includes windows
-/// that have the override-redirect flag set, although we don't do anything
-/// other than keep track of their stacking order and whether they're focused.
+/// that have the override-redirect flag set; however, for such windows, we
+/// don't track any local properties. (In particular, we need to keep track of
+/// the stacking order for all windows.)
 ///
 /// You can essentially think of this as a simulator for a tiny subset of the X
 /// protocol. The point is that keeping track of the state of the server lets us
@@ -52,12 +55,15 @@ pub(crate) struct ClientState {
 ///   there is no corresponding client.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 pub(crate) struct Clients {
+    /// The window stack.
     // It feels wrong to use a vector, since we're going to be inserting and
     // removing elements---but Bjarne Stroustrup says that it takes a
     // ridiculously large n for linked lists to be faster than vectors (and
     // Rust's standard linked list type doesn't even have insert/remove
-    // methods).
+    // methods). Not to mention, a linked list wouldn't even be asymptotically
+    // better, since it still takes O(n) to determine where to insert/remove.
     stack: Vec<Client>,
+    /// The currently-focused window, if any (the root window doesn't count).
     focus: Option<xproto::Window>,
 }
 
@@ -69,6 +75,7 @@ impl Clients {
     }
 
     /// Get the currently-focused client.
+    #[allow(dead_code)]
     pub(crate) fn get_focus_mut(&mut self) -> Option<&mut Client> {
         let window = self.focus?;
         Some(self.get_mut(window))
@@ -96,6 +103,13 @@ impl Clients {
         self.get_with_index_mut(window).1
     }
 
+    pub(crate) fn has_client(&self, window: xproto::Window) -> bool {
+        self.stack
+            .iter()
+            .find(|client| client.window == window)
+            .is_some()
+    }
+
     /// Get an iterator over the stack, from bottom to top.
     pub(crate) fn iter<'a>(&'a self) -> impl DoubleEndedIterator<Item = &'a Client> {
         self.stack.iter()
@@ -107,31 +121,39 @@ impl Clients {
     }
 
     /// Initialize a new client stack by issuing queries to the server.
-    pub(crate) fn new<Conn>(conn: &Conn, screen: usize) -> Result<Self>
+    pub(crate) fn new<Conn>(conn: &Conn, screen: usize, atoms: &Atoms) -> Result<Self>
     where
         Conn: Connection,
     {
         let root = conn.setup().roots[screen].root;
         let mut stack = Vec::new();
         let children = conn.query_tree(root)?.reply()?.children;
+        // Fortunately, the server is guaranteed to return the windows in
+        // stacking order, from bottom to top.
         for window in children {
             let attrs = conn.get_window_attributes(window)?.reply()?;
-            let state = if attrs.override_redirect {
+            let override_redirect = attrs.override_redirect;
+            let state = if override_redirect {
                 None
             } else {
                 let geom = conn.get_geometry(window)?.reply()?;
+                let is_viewable = attrs.map_state == xproto::MapState::VIEWABLE;
+                let wm_protocols = atoms
+                    .get_wm_protocols(conn, window)?
+                    .unwrap_or(WmProtocols::new());
                 Some(ClientState {
                     x: geom.x,
                     y: geom.y,
                     width: geom.width,
                     height: geom.height,
-                    is_viewable: attrs.map_state == xproto::MapState::VIEWABLE,
+                    is_viewable,
+                    wm_protocols,
                 })
             };
             stack.push(Client { window, state })
         }
         let focus = conn.get_input_focus()?.reply()?.focus;
-        let focus = if focus == x11rb::NONE || focus == root {
+        let focus = if stack.iter().find(|client| client.window == focus).is_none() {
             None
         } else {
             Some(focus)
@@ -147,7 +169,6 @@ impl Clients {
 
     /// Remove a client from the stack.
     pub(crate) fn remove(&mut self, window: xproto::Window) {
-        let (i, _) = self.get_with_index(window);
         self.stack.remove(self.get_with_index(window).0);
         if self.focus == Some(window) {
             self.focus = None;
@@ -176,6 +197,7 @@ impl Clients {
     }
 
     /// Raise a client to the top of the stack.
+    #[allow(dead_code)]
     pub(crate) fn to_top(&mut self, window: xproto::Window) {
         if self.top().window == window {
             return;
@@ -191,6 +213,7 @@ impl Clients {
     }
 
     /// Get the client that is on the top of the stack.
+    #[allow(dead_code)]
     pub(crate) fn top_mut(&mut self) -> &mut Client {
         self.stack.last_mut().unwrap()
     }
@@ -228,6 +251,7 @@ fn can_remove_focused_window() {
             width: 10,
             height: 10,
             is_viewable: true,
+            wm_protocols: WmProtocols::new(),
         }),
     });
 
@@ -239,6 +263,7 @@ fn can_remove_focused_window() {
             width: 10,
             height: 10,
             is_viewable: true,
+            wm_protocols: WmProtocols::new(),
         }),
     });
 
@@ -250,6 +275,7 @@ fn can_remove_focused_window() {
             width: 10,
             height: 10,
             is_viewable: false,
+            wm_protocols: WmProtocols::new(),
         }),
     });
 
@@ -261,6 +287,7 @@ fn can_remove_focused_window() {
             width: 10,
             height: 10,
             is_viewable: true,
+            wm_protocols: WmProtocols::new(),
         }),
     });
 

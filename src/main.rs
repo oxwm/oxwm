@@ -1,6 +1,6 @@
+mod atom;
 mod client;
 mod config;
-mod ext;
 mod util;
 
 use std::error::Error;
@@ -9,23 +9,23 @@ use std::process::Command;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConfigureWindowAux;
-use x11rb::protocol::xproto::ConnectionExt;
+use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::Event::*;
 
+use atom::*;
 use client::*;
 use config::*;
-use ext::conn::*;
 use util::*;
-
-/// Minimum client width.
-const MIN_WIDTH: u32 = 256;
-/// Minimum client height.
-const MIN_HEIGHT: u32 = 256;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
 /// anything with errors other than letting them bubble up to the user, so this
 /// is fine for now.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+
+/// Minimum client width.
+const MIN_WIDTH: u32 = 256;
+/// Minimum client height.
+const MIN_HEIGHT: u32 = 256;
 
 pub(crate) struct OxWM<Conn> {
     /// The source of all our problems.
@@ -41,6 +41,8 @@ pub(crate) struct OxWM<Conn> {
     keep_going: bool,
     /// If a window is being dragged, then that state is stored here.
     drag: Option<Drag>,
+    /// Manager for atoms that we need to intern.
+    atoms: Atoms,
 }
 
 impl<Conn> OxWM<Conn> {
@@ -56,7 +58,16 @@ impl<Conn> OxWM<Conn> {
         // Load the config file first, since this is where errors are most
         // likely to occur.
         let config = Config::load()?;
-        let clients = Clients::new(&conn, screen)?;
+        // Grab the server so that we can do setup atomically. We don't need to
+        // worry about ungrabbing if we fail: this function consumes the
+        // connection, so if we fail, the connection will just get dropped.
+        //
+        // TODO Not sure whether it's strictly necessary to grab the server, but
+        // it gives me some peace of mind. Should probably investigate.
+        conn.grab_server()?.check()?;
+        log::debug!("Interning needed atoms.");
+        let atoms = Atoms::new(&conn)?;
+        let clients = Clients::new(&conn, screen, &atoms)?;
         let mut ret = OxWM {
             conn,
             screen,
@@ -64,14 +75,8 @@ impl<Conn> OxWM<Conn> {
             clients,
             keep_going: true,
             drag: None,
+            atoms,
         };
-        // Grab the server so that we can do setup atomically. We don't need to
-        // worry about ungrabbing if we fail: this function consumes the
-        // connection, so if we fail, the connection will just get dropped.
-        //
-        // TODO Not sure whether it's strictly necessary to grab the server, but
-        // it gives me some peace of mind. Should probably investigate.
-        ret.conn.grab_server()?.check()?;
         ret.init()?;
         ret.conn.ungrab_server()?.check()?;
         Ok(ret)
@@ -202,7 +207,8 @@ impl<Conn> OxWM<Conn> {
                 }
                 ConfigureRequest(ev) => {
                     let mut value_list = xproto::ConfigureWindowAux::from_configure_request(&ev);
-                    if self.clients.get(ev.window).is_managed() {
+                    // Windows that have override-redirect set can do whatever they want.
+                    if !self.clients.get(ev.window).override_redirect() {
                         value_list.width = value_list.width.map(|w| w.max(MIN_WIDTH));
                         value_list.height = value_list.height.map(|h| h.max(MIN_HEIGHT));
                     }
@@ -212,8 +218,23 @@ impl<Conn> OxWM<Conn> {
                     }
                 }
                 CreateNotify(ev) => {
+                    let window = ev.window;
+                    if !ev.override_redirect {
+                        if let Err(err) = self.manage(window) {
+                            // Believe it or not, the window could have already
+                            // been destroyed.
+                            //
+                            // This is becoming a problem. I think I know how to
+                            // solve it, but the most general solution involves
+                            // completely rewriting everything to be
+                            // asynchronous. This will be something of a pain,
+                            // and it isn't feasible within the remaining time.
+                            log::warn!("{:?}", err);
+                            continue;
+                        }
+                    }
                     self.clients.push(Client {
-                        window: ev.window,
+                        window,
                         state: if ev.override_redirect {
                             None
                         } else {
@@ -223,15 +244,19 @@ impl<Conn> OxWM<Conn> {
                                 width: ev.width,
                                 height: ev.height,
                                 is_viewable: false,
+                                wm_protocols: self
+                                    .atoms
+                                    .get_wm_protocols(&self.conn, window)?
+                                    .unwrap_or(WmProtocols::new()),
                             })
                         },
                     });
                 }
                 DestroyNotify(ev) => {
+                    let window = ev.window;
                     if let Some(client) = self.clients.get_focus() {
-                        if client.window == ev.window {
-                            // Focus the first visible managed client that we can
-                            // find.
+                        if client.window == window {
+                            // Focus the first managed client that we can find.
                             for client in self.clients.iter().rev().skip(1) {
                                 if let Some(ref st) = client.state {
                                     if st.is_viewable {
@@ -242,10 +267,14 @@ impl<Conn> OxWM<Conn> {
                             }
                         }
                     }
-                    self.clients.remove(ev.window);
+                    // Have to check here in case the window got destroyed
+                    // before we could add it.
+                    if self.clients.has_client(window) {
+                        self.clients.remove(window);
+                    }
                     // If we were dragging the window, stop dragging it.
                     if let Some(ref drag) = self.drag {
-                        if drag.window == ev.window {
+                        if drag.window == window {
                             self.drag = None;
                         }
                     }
@@ -253,7 +282,9 @@ impl<Conn> OxWM<Conn> {
                 EnterNotify(ev) => {
                     let window = ev.event;
                     if let FocusModel::Autofocus = self.config.focus_model {
-                        self.focus(window)?;
+                        if let Err(err) = self.focus(window) {
+                            log::warn!("{:?}", err);
+                        }
                     }
                 }
                 FocusIn(ev) => {
@@ -270,12 +301,8 @@ impl<Conn> OxWM<Conn> {
                     if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
                         st.is_viewable = true;
                     }
-                    self.clients.set_focus(ev.window);
                 }
-                MapRequest(ev) => {
-                    self.manage(ev.window)?;
-                    self.conn.map_window(ev.window)?.check()?
-                }
+                MapRequest(ev) => self.conn.map_window(ev.window)?.check()?,
                 MotionNotify(ev) => {
                     let drag = self.drag.as_ref().unwrap();
                     let config = match drag.type_ {
@@ -348,53 +375,29 @@ impl<Conn> OxWM<Conn> {
                     };
                     self.conn.configure_window(drag.window, &config)?.check()?;
                 }
-                UnmapNotify(ev) => {
-                    if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
-                        st.is_viewable = false;
+                PropertyNotify(ev) => {
+                    let window = ev.window;
+                    if ev.atom == self.atoms.wm_protocols {
+                        log::debug!("Updating WM_PROTOCOLS.");
+                        self.clients
+                            .get_mut(window)
+                            .state
+                            .as_mut()
+                            .unwrap()
+                            .wm_protocols = self
+                            .atoms
+                            .get_wm_protocols(&self.conn, window)?
+                            .unwrap_or(WmProtocols::new());
+                    } else {
+                        log::warn!("Ignoring.");
                     }
+                }
+                UnmapNotify(_) => {
+                    self.clients.set_focus(None);
                 }
                 _ => log::warn!("Unhandled event!"),
             }
         }
-        Ok(())
-    }
-
-    /// A button has been clicked (without the modifier).
-    fn click(&self, window: xproto::Window) -> Result<()>
-    where
-        Conn: Connection,
-    {
-        self.focus(window)?;
-        self.raise(window)?;
-        Ok(())
-    }
-
-    /// Focus a window.
-    fn focus(&self, window: xproto::Window) -> Result<()>
-    where
-        Conn: Connection,
-    {
-        self.conn
-            .set_input_focus(
-                xproto::InputFocus::POINTER_ROOT,
-                window,
-                x11rb::CURRENT_TIME,
-            )?
-            .check()?;
-        Ok(())
-    }
-
-    /// Raise a window to the front of the stack.
-    fn raise(&self, window: xproto::Window) -> Result<()>
-    where
-        Conn: Connection,
-    {
-        self.conn
-            .configure_window(
-                window,
-                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
-            )?
-            .check()?;
         Ok(())
     }
 
@@ -431,20 +434,54 @@ impl<Conn> OxWM<Conn> {
         });
     }
 
-    fn get_wm_name(&self, window: xproto::Window) -> Result<String>
+    /// A button has been clicked.
+    fn click(&self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        let bytes = self
-            .conn
-            .get_property_simple(window, xproto::AtomEnum::WM_NAME, xproto::AtomEnum::STRING)?
-            .reply()?
-            .value;
-        // TODO implement compound text decoding
-        Ok(String::from_utf8(bytes).unwrap())
+        self.focus(window)?;
+        self.raise(window)?;
+        Ok(())
     }
 
-    /// Begin managing a window (usually in response to a MapRequest).
+    /// Focus a window.
+    fn focus(&self, window: xproto::Window) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        self.conn
+            .set_input_focus(
+                xproto::InputFocus::POINTER_ROOT,
+                window,
+                x11rb::CURRENT_TIME,
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    /// Kill a window.
+    fn kill(&self, window: xproto::Window) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        let wm_protocols = &self
+            .clients
+            .get(window)
+            .state
+            .as_ref()
+            .unwrap()
+            .wm_protocols;
+        if wm_protocols.delete_window {
+            log::debug!("Client supports WM_DELETE_WINDOW; sending a message.");
+            self.atoms.delete_window(&self.conn, window)?;
+        } else {
+            log::debug!("Client doesn't support WM_DELETE_WINDOW; killing directly.");
+            self.conn.kill_client(window)?.check()?;
+        }
+        Ok(())
+    }
+
+    /// Begin managing a window.
     fn manage(&self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
@@ -506,8 +543,24 @@ impl<Conn> OxWM<Conn> {
             .change_window_attributes(
                 window,
                 &xproto::ChangeWindowAttributesAux::new().event_mask(
-                    xproto::EventMask::ENTER_WINDOW | xproto::EventMask::PROPERTY_CHANGE,
+                    xproto::EventMask::ENTER_WINDOW
+                        | xproto::EventMask::FOCUS_CHANGE
+                        | xproto::EventMask::PROPERTY_CHANGE,
                 ),
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    /// Raise a window to the front of the stack.
+    fn raise(&self, window: xproto::Window) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        self.conn
+            .configure_window(
+                window,
+                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
             )?
             .check()?;
         Ok(())
@@ -521,8 +574,7 @@ impl<Conn> OxWM<Conn> {
     where
         Conn: Connection,
     {
-        self.conn.kill_client(window)?.check()?;
-        Ok(())
+        self.kill(window)
     }
 
     /// Poison the window manager, causing it to die promptly.
