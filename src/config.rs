@@ -1,11 +1,12 @@
+use crate::util::*;
 use crate::OxWM;
 use crate::Result;
 
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
-use std::{collections::HashMap, num::ParseIntError};
 
 use serde::ser::SerializeStruct;
 use serde::Deserialize;
@@ -210,10 +211,12 @@ impl<Conn> Config<Conn> {
 
 #[derive(PartialEq, Eq, Clone, Debug, Error)]
 enum ConfigError {
-    #[error("error while parsing keycode: {0:}")]
-    KeycodeError(ParseIntError),
-    #[error("invalid action: {0}")]
-    ActionError(String),
+    #[error("Error finding keysym for: {0}")]
+    KeysymError(String),
+    #[error("Error finding keycode for: {0}")]
+    KeycodeError(xproto::Keysym),
+    #[error("Invalid action: {0}")]
+    InvalidAction(String),
 }
 use ConfigError::*;
 
@@ -227,16 +230,23 @@ where
         let mod_mask = raw.mod_mask.unwrap_or(ModMask::Mod4).into();
         let focus_model = raw.focus_model.unwrap_or(FocusModel::Click);
         let mut keybinds = HashMap::new();
-        let mut keybind_names = HashMap::new();
-        for (keycode, action_name) in raw.keybinds.unwrap_or_default() {
-            let keycode = keycode.parse::<u8>().map_err(KeycodeError)?;
+        //let mut keybind_names = HashMap::new();
+        let keybind_names = raw.keybinds.clone(); //Retain for later serialization
+        for (key_name, action_name) in raw.keybinds.unwrap_or_default() {
+            let keycode = match keysym_from_name(&key_name) {
+                None => Err(KeysymError(key_name)),
+                Some(key_sym) => match keycode_from_keysym(key_sym) {
+                    None => Err(KeycodeError(key_sym)),
+                    Some(key_code) => Ok(key_code),
+                },
+            }?;
             let action: Result<Action<Conn>> = match action_name.as_str() {
                 "kill" => Ok(OxWM::kill_focused_client),
                 "quit" => Ok(OxWM::poison),
-                _ => Err(Box::new(ActionError(action_name.clone()))),
+                _ => Err(Box::new(InvalidAction(action_name.clone()))),
             };
             keybinds.insert(keycode, action?);
-            keybind_names.insert(keycode, action_name);
+            //keybind_names.insert(keycode, action_name);
         }
         Ok(Self {
             startup,
@@ -257,8 +267,8 @@ where
         D: Deserializer<'de>,
     {
         let raw = RawConfig::deserialize(deserializer)?;
-        Self::try_from(raw).map_err(|action_name| {
-            <D::Error as serde::de::Error>::custom(format!("unknown action {}", action_name))
+        Self::try_from(raw).map_err(|config_error| {
+            <D::Error as serde::de::Error>::custom(format!("{}", config_error))
         })
     }
 }

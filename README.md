@@ -10,16 +10,15 @@ mod_mask = "mod4"
 startup = ["konsole"]
 
 [keybinds]
-24 = "quit"
+Escape = "quit"
+q = "kill"
 ```
 
 This tells OxWM that `mod4` (usually Super/the Windows key) is the global
 modifier key, and that OxWM should run `konsole` on startup. It also tells OxWM
-that, with the modifier key pressed, keycode 24 ("q" on my system) should exit.
-Mapping keycodes to actions is not very user-friendly---we would much rather map
-keysyms---but there doesn't seem to be an easy way to map between keycodes and
-keysyms, so we're mapping keycodes for now. You can use `xev` to determine the
-keycode for a particular key on your system.
+that, with the modifier key pressed, pressing the `escape` key should exit, or 
+pressing the `q` kill should immediately abort the process of the focused window.
+You can use `xev` to determine the name for a particular key on your system.
 
 Note that, at the moment, if you don't have this config file, the program just
 won't run.
