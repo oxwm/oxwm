@@ -6,14 +6,17 @@ use x11rb::protocol::xproto::ConnectionExt as _;
 
 use crate::Result;
 
+/// A client's WM_PROTOCOLS. We ignore the deprecated WM_SAVE_YOURSELF protocol.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug)]
 pub struct WmProtocols {
+    /// Whether the client supports WM_TAKE_FOCUS.
     pub take_focus: bool,
+    /// Whether the client supports WM_DELETE_WINDOW.
     pub delete_window: bool,
 }
 
 impl WmProtocols {
-    /// Default value for WM_PROTOCOLS, in which no protocols are supported.
+    /// Default value for WM_PROTOCOLS, indicating no supported protocols.
     pub(crate) fn new() -> WmProtocols {
         WmProtocols {
             take_focus: false,
@@ -22,10 +25,14 @@ impl WmProtocols {
     }
 }
 
+/// A client's WM_STATE.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Debug)]
 pub enum WmState {
+    /// The Withdrawn state.
     Withdrawn,
+    /// The Normal state.
     Normal,
+    /// The Iconic state.
     Iconic,
 }
 
@@ -39,6 +46,8 @@ impl From<WmState> for u32 {
     }
 }
 
+/// An error indicating that a client's property had an unrecoverable unexpected
+/// format or value.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug, Error)]
 #[error("error while decoding atom")]
 struct AtomDecodeError;
@@ -46,13 +55,18 @@ struct AtomDecodeError;
 /// Keeps track of standard ICCCM atoms, and provides a few functions for
 /// getting/setting certain properties.
 pub struct Atoms {
+    /// The interned WM_DELETE_WINDOW atom.
     pub(crate) wm_delete_window: xproto::Atom,
+    /// The interned WM_PROTOCOLS atom.
     pub(crate) wm_protocols: xproto::Atom,
+    /// The interned WM_SAVE_YOURSELF atom.
     pub(crate) wm_save_yourself: xproto::Atom,
+    /// The interned WM_TAKE_FOCUS atom.
     pub(crate) wm_take_focus: xproto::Atom,
 }
 
 impl Atoms {
+    /// Create a new `Atoms` object by interning some atoms.
     pub fn new<Conn>(conn: &Conn) -> Result<Atoms>
     where
         Conn: Connection,
@@ -111,6 +125,7 @@ impl Atoms {
         Ok(())
     }
 
+    /// Get a WM_PROTOCOLS property.
     pub fn get_wm_protocols<Conn>(
         &self,
         conn: &Conn,

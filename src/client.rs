@@ -103,6 +103,7 @@ impl Clients {
         self.get_with_index_mut(window).1
     }
 
+    /// Indicates whether a client corresponding to the given window exists.
     pub(crate) fn has_client(&self, window: xproto::Window) -> bool {
         self.stack
             .iter()
@@ -220,6 +221,8 @@ impl Clients {
 
     // Private methods
 
+    /// Get the `Client` that corresponds to a given window, along with its
+    /// index.
     fn get_with_index(&self, window: xproto::Window) -> (usize, &Client) {
         self.iter()
             .enumerate()
@@ -227,6 +230,8 @@ impl Clients {
             .unwrap()
     }
 
+    /// Get the `Client` that corresponds to a given window, along with its
+    /// index.
     fn get_with_index_mut(&mut self, window: xproto::Window) -> (usize, &mut Client) {
         self.iter_mut()
             .enumerate()
@@ -235,7 +240,7 @@ impl Clients {
     }
 }
 
-///Tests
+/// Tests.
 #[test]
 fn can_remove_focused_window() {
     let mut clients = Clients {

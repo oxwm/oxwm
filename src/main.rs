@@ -222,13 +222,7 @@ impl<Conn> OxWM<Conn> {
                     if !ev.override_redirect {
                         if let Err(err) = self.manage(window) {
                             // Believe it or not, the window could have already
-                            // been destroyed.
-                            //
-                            // This is becoming a problem. I think I know how to
-                            // solve it, but the most general solution involves
-                            // completely rewriting everything to be
-                            // asynchronous. This will be something of a pain,
-                            // and it isn't feasible within the remaining time.
+                            // been destroyed. (This is becoming a problem.)
                             log::warn!("{:?}", err);
                             continue;
                         }
@@ -401,6 +395,7 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
+    /// Initiate a drag on the given window.
     fn begin_drag(&mut self, window: xproto::Window, button: xproto::Button, x: i16, y: i16) {
         let st = self.clients.get(window).state.as_ref().unwrap();
         let (type_, corner) = match button {
@@ -594,15 +589,21 @@ impl<Conn> OxWM<Conn> {
     }
 }
 
+/// A corner.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 enum Corner {
+    /// The top-left corner.
     LeftTop,
+    /// The bottom-left corner.
     LeftBottom,
+    /// The top-right corner.
     RightTop,
+    /// The bottom-right corner.
     RightBottom,
 }
 
 impl Corner {
+    /// Obtain the relative location of a corner for a given client window.
     fn relative(&self, st: &ClientState) -> (i16, i16) {
         match self {
             Self::LeftTop => (0, 0),
@@ -613,9 +614,12 @@ impl Corner {
     }
 }
 
+/// A type of drag: either moving or resizing from a particular corner.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 enum DragType {
+    /// A moving drag.
     MOVE,
+    /// A resizing drag.
     RESIZE(Corner),
 }
 
@@ -634,6 +638,7 @@ struct Drag {
     y: i16,
 }
 
+/// Run the window manager.
 fn run_wm() -> Result<()> {
     log::debug!("Connecting to the X server.");
     let (conn, screen) = x11rb::connect(None)?;
@@ -644,6 +649,7 @@ fn run_wm() -> Result<()> {
     oxwm.run()
 }
 
+/// Run the program.
 fn main() -> Result<()> {
     simple_logger::SimpleLogger::new().init()?;
     run_wm()
