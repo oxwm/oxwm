@@ -63,9 +63,13 @@ pub enum FocusModel {
 /// Type of "raw" configs, straight from the source.
 #[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
 struct RawConfig {
+    /// Startup programs.
     startup: Option<Vec<String>>,
+    /// Global modifier mask.
     mod_mask: Option<ModMask>,
+    /// Focus model.
     focus_model: Option<FocusModel>,
+    /// Keybinds.
     keybinds: Option<HashMap<String, String>>,
 }
 
@@ -73,12 +77,17 @@ struct RawConfig {
 /// because Rust doesn't have higher-rank types yet.
 #[derive(Clone)]
 pub(crate) struct Config<Conn> {
+    /// Startup programs.
     pub(crate) startup: Vec<String>,
+    /// Global modifier mask.
     pub(crate) mod_mask: xproto::ModMask,
+    /// Focus model.
     pub(crate) focus_model: FocusModel,
+    /// Keybinds.
     pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
 }
 
+/// An error indicating that we can't find the user's config directory.
 #[derive(
     PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash, Error, Deserialize, Serialize,
 )]
@@ -92,8 +101,8 @@ impl<Conn> Config<Conn> {
     where
         Conn: Connection,
     {
-        // TODO Will this work on Unix (e.g., BSD)? We should probably make sure
-        // it works on Unix.
+        // TODO Will this work on proper Unix (e.g., BSD)? We should probably
+        // make sure it works on Unix.
         let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
         path.push("oxwm");
         path.push("config.toml");
@@ -114,7 +123,8 @@ impl<Conn> Config<Conn> {
     where
         Conn: Connection,
     {
-        toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)
+        let ret = toml::from_str(s)?;
+        Ok(ret)
     }
 }
 

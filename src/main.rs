@@ -222,13 +222,7 @@ impl<Conn> OxWM<Conn> {
                     if !ev.override_redirect {
                         if let Err(err) = self.manage(window) {
                             // Believe it or not, the window could have already
-                            // been destroyed.
-                            //
-                            // This is becoming a problem. I think I know how to
-                            // solve it, but the most general solution involves
-                            // completely rewriting everything to be
-                            // asynchronous. This will be something of a pain,
-                            // and it isn't feasible within the remaining time.
+                            // been destroyed. (This is becoming a problem.)
                             log::warn!("{:?}", err);
                             continue;
                         }
@@ -244,10 +238,11 @@ impl<Conn> OxWM<Conn> {
                                 width: ev.width,
                                 height: ev.height,
                                 is_viewable: false,
-                                wm_protocols: self
-                                    .atoms
-                                    .get_wm_protocols(&self.conn, window)?
-                                    .unwrap_or(WmProtocols::new()),
+                                wm_protocols: self.atoms.get_wm_protocols(&self.conn, window)?,
+                                wm_state: Some(WmState {
+                                    state: WmStateState::Withdrawn,
+                                    icon: x11rb::NONE,
+                                }),
                             })
                         },
                     });
@@ -298,9 +293,18 @@ impl<Conn> OxWM<Conn> {
                     action(&mut self, ev.child)?;
                 }
                 MapNotify(ev) => {
-                    if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
+                    let window = ev.window;
+                    if let Some(ref mut st) = self.clients.get_mut(window).state {
                         st.is_viewable = true;
                     }
+                    self.atoms.set_wm_state(
+                        &self.conn,
+                        window,
+                        WmState {
+                            state: WmStateState::Normal,
+                            icon: x11rb::NONE,
+                        },
+                    )?;
                 }
                 MapRequest(ev) => self.conn.map_window(ev.window)?.check()?,
                 MotionNotify(ev) => {
@@ -384,16 +388,36 @@ impl<Conn> OxWM<Conn> {
                             .state
                             .as_mut()
                             .unwrap()
-                            .wm_protocols = self
-                            .atoms
-                            .get_wm_protocols(&self.conn, window)?
-                            .unwrap_or(WmProtocols::new());
+                            .wm_protocols = self.atoms.get_wm_protocols(&self.conn, window)?;
+                    } else if ev.atom == self.atoms.wm_state {
+                        log::debug!("Updating WM_STATE.");
+                        self.clients
+                            .get_mut(window)
+                            .state
+                            .as_mut()
+                            .unwrap()
+                            .wm_state = self.atoms.get_wm_state(&self.conn, window)?;
                     } else {
                         log::warn!("Ignoring.");
                     }
                 }
-                UnmapNotify(_) => {
-                    self.clients.set_focus(None);
+                UnmapNotify(ev) => {
+                    let window = ev.window;
+                    if let Some(client) = self.clients.get_focus() {
+                        if client.window == window {
+                            self.clients.set_focus(None);
+                        }
+                    }
+                    if let Err(err) = self.atoms.set_wm_state(
+                        &self.conn,
+                        window,
+                        WmState {
+                            state: WmStateState::Withdrawn,
+                            icon: x11rb::NONE,
+                        },
+                    ) {
+                        log::warn!("{:?}", err);
+                    }
                 }
                 _ => log::warn!("Unhandled event!"),
             }
@@ -401,6 +425,7 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
+    /// Initiate a drag on the given window.
     fn begin_drag(&mut self, window: xproto::Window, button: xproto::Button, x: i16, y: i16) {
         let st = self.clients.get(window).state.as_ref().unwrap();
         let (type_, corner) = match button {
@@ -486,6 +511,19 @@ impl<Conn> OxWM<Conn> {
     where
         Conn: Connection,
     {
+        let attrs = self.conn.get_window_attributes(window)?.reply()?;
+        let state = match attrs.map_state {
+            xproto::MapState::VIEWABLE => WmStateState::Normal,
+            _ => WmStateState::Withdrawn,
+        };
+        self.atoms.set_wm_state(
+            &self.conn,
+            window,
+            WmState {
+                state,
+                icon: x11rb::NONE,
+            },
+        )?;
         // Grab modifier + nothing.
         let nomod: u16 = 0;
         // TODO I don't fully understand sync/async grab modes.
@@ -594,15 +632,21 @@ impl<Conn> OxWM<Conn> {
     }
 }
 
+/// A corner.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 enum Corner {
+    /// The top-left corner.
     LeftTop,
+    /// The bottom-left corner.
     LeftBottom,
+    /// The top-right corner.
     RightTop,
+    /// The bottom-right corner.
     RightBottom,
 }
 
 impl Corner {
+    /// Obtain the relative location of a corner for a given client window.
     fn relative(&self, st: &ClientState) -> (i16, i16) {
         match self {
             Self::LeftTop => (0, 0),
@@ -613,9 +657,12 @@ impl Corner {
     }
 }
 
+/// A type of drag: either moving or resizing from a particular corner.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 enum DragType {
+    /// A moving drag.
     MOVE,
+    /// A resizing drag.
     RESIZE(Corner),
 }
 
@@ -634,6 +681,7 @@ struct Drag {
     y: i16,
 }
 
+/// Run the window manager.
 fn run_wm() -> Result<()> {
     log::debug!("Connecting to the X server.");
     let (conn, screen) = x11rb::connect(None)?;
@@ -644,6 +692,7 @@ fn run_wm() -> Result<()> {
     oxwm.run()
 }
 
+/// Run the program.
 fn main() -> Result<()> {
     simple_logger::SimpleLogger::new().init()?;
     run_wm()
