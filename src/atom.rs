@@ -1,14 +1,23 @@
+use std::convert::TryFrom;
+
 use thiserror::Error;
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::wrapper::ConnectionExt as _;
 
 use crate::Result;
 
+/// An error indicating that a client's property had an unrecoverable unexpected
+/// format or value.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug, Error)]
+#[error("error while decoding property")]
+pub(crate) struct AtomDecodeError;
+
 /// A client's WM_PROTOCOLS. We ignore the deprecated WM_SAVE_YOURSELF protocol.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug)]
-pub struct WmProtocols {
+pub(crate) struct WmProtocols {
     /// Whether the client supports WM_TAKE_FOCUS.
     pub take_focus: bool,
     /// Whether the client supports WM_DELETE_WINDOW.
@@ -25,9 +34,37 @@ impl WmProtocols {
     }
 }
 
-/// A client's WM_STATE.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Debug)]
-pub enum WmState {
+pub(crate) struct WmState {
+    /// The WM_STATE.state field, indicating the state that the window is in.
+    pub(crate) state: WmStateState,
+    /// The WM_STATE.icon field, indicating the icon that represents the client.
+    pub(crate) icon: xproto::Window,
+}
+
+impl From<WmState> for [u32; 2] {
+    fn from(st: WmState) -> [u32; 2] {
+        [u32::from(st.state), st.icon]
+    }
+}
+
+impl TryFrom<Vec<u32>> for WmState {
+    type Error = AtomDecodeError;
+
+    fn try_from(value: Vec<u32>) -> std::result::Result<Self, Self::Error> {
+        match value[..] {
+            [state, icon] => Ok(WmState {
+                state: WmStateState::try_from(state)?,
+                icon,
+            }),
+            _ => Err(AtomDecodeError),
+        }
+    }
+}
+
+/// Possible values for WM_STATE.state.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Debug)]
+pub(crate) enum WmStateState {
     /// The Withdrawn state.
     Withdrawn,
     /// The Normal state.
@@ -36,21 +73,28 @@ pub enum WmState {
     Iconic,
 }
 
-impl From<WmState> for u32 {
-    fn from(st: WmState) -> Self {
+impl From<WmStateState> for u32 {
+    fn from(st: WmStateState) -> Self {
         match st {
-            WmState::Withdrawn => 0,
-            WmState::Normal => 1,
-            WmState::Iconic => 3,
+            WmStateState::Withdrawn => 0,
+            WmStateState::Normal => 1,
+            WmStateState::Iconic => 3,
         }
     }
 }
 
-/// An error indicating that a client's property had an unrecoverable unexpected
-/// format or value.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug, Error)]
-#[error("error while decoding atom")]
-struct AtomDecodeError;
+impl TryFrom<u32> for WmStateState {
+    type Error = AtomDecodeError;
+
+    fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(WmStateState::Withdrawn),
+            1 => Ok(WmStateState::Normal),
+            3 => Ok(WmStateState::Iconic),
+            _ => Err(AtomDecodeError),
+        }
+    }
+}
 
 /// Keeps track of standard ICCCM atoms, and provides a few functions for
 /// getting/setting certain properties.
@@ -61,13 +105,15 @@ pub struct Atoms {
     pub(crate) wm_protocols: xproto::Atom,
     /// The interned WM_SAVE_YOURSELF atom.
     pub(crate) wm_save_yourself: xproto::Atom,
+    /// The interned WM_STATE atom.
+    pub(crate) wm_state: xproto::Atom,
     /// The interned WM_TAKE_FOCUS atom.
     pub(crate) wm_take_focus: xproto::Atom,
 }
 
 impl Atoms {
     /// Create a new `Atoms` object by interning some atoms.
-    pub fn new<Conn>(conn: &Conn) -> Result<Atoms>
+    pub(crate) fn new<Conn>(conn: &Conn) -> Result<Atoms>
     where
         Conn: Connection,
     {
@@ -86,6 +132,11 @@ impl Atoms {
             .intern_atom(false, "WM_SAVE_YOURSELF".as_bytes())?
             .reply()?
             .atom;
+        log::trace!("Interning WM_STATE.");
+        let wm_state = conn
+            .intern_atom(false, "WM_STATE".as_bytes())?
+            .reply()?
+            .atom;
         log::trace!("Interning WM_TAKE_FOCUS.");
         let wm_take_focus = conn
             .intern_atom(false, "WM_TAKE_FOCUS".as_bytes())?
@@ -96,18 +147,17 @@ impl Atoms {
             wm_delete_window,
             wm_protocols,
             wm_save_yourself,
+            wm_state,
             wm_take_focus,
         })
     }
 
     /// Send a WM_DELETE_WINDOW message.
-    pub fn delete_window<Conn>(&self, conn: &Conn, window: xproto::Window) -> Result<()>
+    pub(crate) fn delete_window<Conn>(&self, conn: &Conn, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        let mut data = [0; 5];
-        data[0] = self.wm_delete_window;
-        data[1] = x11rb::CURRENT_TIME;
+        let data = [self.wm_delete_window, 0, 0, 0, 0];
         conn.send_event(
             false,
             window,
@@ -125,12 +175,12 @@ impl Atoms {
         Ok(())
     }
 
-    /// Get a WM_PROTOCOLS property.
-    pub fn get_wm_protocols<Conn>(
+    /// Get a window's WM_PROTOCOLS property. If the property is not set, a default value is used.
+    pub(crate) fn get_wm_protocols<Conn>(
         &self,
         conn: &Conn,
         window: xproto::Window,
-    ) -> Result<Option<WmProtocols>>
+    ) -> Result<WmProtocols>
     where
         Conn: Connection,
     {
@@ -148,7 +198,7 @@ impl Atoms {
             .reply()?;
         log::trace!("Got reply: {:?}", reply);
         if reply.format == 0 {
-            return Ok(None);
+            return Ok(WmProtocols::new());
         }
         let reply = reply.value32().ok_or(AtomDecodeError)?;
         let mut ret = WmProtocols {
@@ -166,6 +216,47 @@ impl Atoms {
                 log::warn!("Ignoring unrecognized WM_PROTOCOL {}.", atom);
             }
         }
-        Ok(Some(ret))
+        Ok(ret)
+    }
+
+    /// Get a window's WM_STATE property.
+    pub(crate) fn get_wm_state<Conn>(
+        &self,
+        conn: &Conn,
+        window: xproto::Window,
+    ) -> Result<Option<WmState>>
+    where
+        Conn: Connection,
+    {
+        let reply = conn
+            .get_property(false, window, self.wm_state, self.wm_state, 0, 2)?
+            .reply()?;
+        if reply.format == 0 {
+            return Ok(None);
+        }
+        let reply = reply.value32().ok_or(AtomDecodeError)?.collect::<Vec<_>>();
+        Ok(Some(WmState::try_from(reply)?))
+    }
+
+    /// Set a window's WM_STATE property.
+    pub(crate) fn set_wm_state<Conn>(
+        &self,
+        conn: &Conn,
+        window: xproto::Window,
+        state: WmState,
+    ) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        let state: [u32; 2] = state.into();
+        conn.change_property32(
+            xproto::PropMode::REPLACE,
+            window,
+            self.wm_state,
+            self.wm_state,
+            &state,
+        )?
+        .check()?;
+        Ok(())
     }
 }

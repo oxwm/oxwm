@@ -30,7 +30,7 @@ something like this:
 ```sh
 xsetroot -cursor_name left_ptr &
 pushd $OXWM_DIRECTORY  # wherever you've cloned the source to
-cargo install --path .
+cargo build && cargo install --path .
 popd
 exec oxwm >~/.Xoutput 2>&1  # assuming Cargo's bin/ directory is in your $PATH
 ```

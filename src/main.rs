@@ -238,10 +238,11 @@ impl<Conn> OxWM<Conn> {
                                 width: ev.width,
                                 height: ev.height,
                                 is_viewable: false,
-                                wm_protocols: self
-                                    .atoms
-                                    .get_wm_protocols(&self.conn, window)?
-                                    .unwrap_or(WmProtocols::new()),
+                                wm_protocols: self.atoms.get_wm_protocols(&self.conn, window)?,
+                                wm_state: Some(WmState {
+                                    state: WmStateState::Withdrawn,
+                                    icon: x11rb::NONE,
+                                }),
                             })
                         },
                     });
@@ -292,9 +293,18 @@ impl<Conn> OxWM<Conn> {
                     action(&mut self, ev.child)?;
                 }
                 MapNotify(ev) => {
-                    if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
+                    let window = ev.window;
+                    if let Some(ref mut st) = self.clients.get_mut(window).state {
                         st.is_viewable = true;
                     }
+                    self.atoms.set_wm_state(
+                        &self.conn,
+                        window,
+                        WmState {
+                            state: WmStateState::Normal,
+                            icon: x11rb::NONE,
+                        },
+                    )?;
                 }
                 MapRequest(ev) => self.conn.map_window(ev.window)?.check()?,
                 MotionNotify(ev) => {
@@ -378,16 +388,36 @@ impl<Conn> OxWM<Conn> {
                             .state
                             .as_mut()
                             .unwrap()
-                            .wm_protocols = self
-                            .atoms
-                            .get_wm_protocols(&self.conn, window)?
-                            .unwrap_or(WmProtocols::new());
+                            .wm_protocols = self.atoms.get_wm_protocols(&self.conn, window)?;
+                    } else if ev.atom == self.atoms.wm_state {
+                        log::debug!("Updating WM_STATE.");
+                        self.clients
+                            .get_mut(window)
+                            .state
+                            .as_mut()
+                            .unwrap()
+                            .wm_state = self.atoms.get_wm_state(&self.conn, window)?;
                     } else {
                         log::warn!("Ignoring.");
                     }
                 }
-                UnmapNotify(_) => {
-                    self.clients.set_focus(None);
+                UnmapNotify(ev) => {
+                    let window = ev.window;
+                    if let Some(client) = self.clients.get_focus() {
+                        if client.window == window {
+                            self.clients.set_focus(None);
+                        }
+                    }
+                    if let Err(err) = self.atoms.set_wm_state(
+                        &self.conn,
+                        window,
+                        WmState {
+                            state: WmStateState::Withdrawn,
+                            icon: x11rb::NONE,
+                        },
+                    ) {
+                        log::warn!("{:?}", err);
+                    }
                 }
                 _ => log::warn!("Unhandled event!"),
             }
@@ -481,6 +511,19 @@ impl<Conn> OxWM<Conn> {
     where
         Conn: Connection,
     {
+        let attrs = self.conn.get_window_attributes(window)?.reply()?;
+        let state = match attrs.map_state {
+            xproto::MapState::VIEWABLE => WmStateState::Normal,
+            _ => WmStateState::Withdrawn,
+        };
+        self.atoms.set_wm_state(
+            &self.conn,
+            window,
+            WmState {
+                state,
+                icon: x11rb::NONE,
+            },
+        )?;
         // Grab modifier + nothing.
         let nomod: u16 = 0;
         // TODO I don't fully understand sync/async grab modes.

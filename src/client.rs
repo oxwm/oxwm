@@ -35,8 +35,10 @@ pub(crate) struct ClientState {
     pub(crate) height: u16,
     /// Whether the window is viewable.
     pub(crate) is_viewable: bool,
-    /// WM_PROTOCOLS.
+    /// The client's WM_PROTOCOLS.
     pub(crate) wm_protocols: WmProtocols,
+    /// The client's WM_STATE.
+    pub(crate) wm_state: Option<WmState>,
 }
 
 /// Local data about the state of all top-level windows. This includes windows
@@ -139,9 +141,8 @@ impl Clients {
             } else {
                 let geom = conn.get_geometry(window)?.reply()?;
                 let is_viewable = attrs.map_state == xproto::MapState::VIEWABLE;
-                let wm_protocols = atoms
-                    .get_wm_protocols(conn, window)?
-                    .unwrap_or(WmProtocols::new());
+                let wm_protocols = atoms.get_wm_protocols(conn, window)?;
+                let wm_state = atoms.get_wm_state(conn, window)?;
                 Some(ClientState {
                     x: geom.x,
                     y: geom.y,
@@ -149,6 +150,7 @@ impl Clients {
                     height: geom.height,
                     is_viewable,
                     wm_protocols,
+                    wm_state,
                 })
             };
             stack.push(Client { window, state })
@@ -257,6 +259,7 @@ fn can_remove_focused_window() {
             height: 10,
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
+            wm_state: None,
         }),
     });
 
@@ -269,6 +272,7 @@ fn can_remove_focused_window() {
             height: 10,
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
+            wm_state: None,
         }),
     });
 
@@ -281,6 +285,7 @@ fn can_remove_focused_window() {
             height: 10,
             is_viewable: false,
             wm_protocols: WmProtocols::new(),
+            wm_state: None,
         }),
     });
 
@@ -293,6 +298,7 @@ fn can_remove_focused_window() {
             height: 10,
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
+            wm_state: None,
         }),
     });
 
