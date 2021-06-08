@@ -1,19 +1,11 @@
 use std::convert::TryFrom;
 
-use thiserror::Error;
-
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::Result;
-
-/// An error indicating that a client's property had an unrecoverable unexpected
-/// format or value.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug, Error)]
-#[error("error while decoding property")]
-pub(crate) struct AtomDecodeError;
 
 /// A client's WM_PROTOCOLS. We ignore the deprecated WM_SAVE_YOURSELF protocol.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Hash, Debug)]
@@ -49,7 +41,7 @@ impl From<WmState> for [u32; 2] {
 }
 
 impl TryFrom<Vec<u32>> for WmState {
-    type Error = AtomDecodeError;
+    type Error = ();
 
     fn try_from(value: Vec<u32>) -> std::result::Result<Self, Self::Error> {
         match value[..] {
@@ -57,7 +49,7 @@ impl TryFrom<Vec<u32>> for WmState {
                 state: WmStateState::try_from(state)?,
                 icon,
             }),
-            _ => Err(AtomDecodeError),
+            _ => Err(()),
         }
     }
 }
@@ -84,14 +76,14 @@ impl From<WmStateState> for u32 {
 }
 
 impl TryFrom<u32> for WmStateState {
-    type Error = AtomDecodeError;
+    type Error = ();
 
     fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
         match value {
             0 => Ok(WmStateState::Withdrawn),
             1 => Ok(WmStateState::Normal),
             3 => Ok(WmStateState::Iconic),
-            _ => Err(AtomDecodeError),
+            _ => Err(()),
         }
     }
 }
@@ -197,10 +189,10 @@ impl Atoms {
             )?
             .reply()?;
         log::trace!("Got reply: {:?}", reply);
-        if reply.format == 0 {
-            return Ok(WmProtocols::new());
-        }
-        let reply = reply.value32().ok_or(AtomDecodeError)?;
+        let reply = match reply.value32() {
+            None => return Ok(WmProtocols::new()),
+            Some(x) => x,
+        };
         let mut ret = WmProtocols {
             take_focus: false,
             delete_window: false,
@@ -231,11 +223,15 @@ impl Atoms {
         let reply = conn
             .get_property(false, window, self.wm_state, self.wm_state, 0, 2)?
             .reply()?;
-        if reply.format == 0 {
-            return Ok(None);
+        let reply = match reply.value32() {
+            None => return Ok(None),
+            Some(x) => x,
         }
-        let reply = reply.value32().ok_or(AtomDecodeError)?.collect::<Vec<_>>();
-        Ok(Some(WmState::try_from(reply)?))
+        .collect::<Vec<_>>();
+        Ok(match WmState::try_from(reply) {
+            Ok(x) => Some(x),
+            Err(_) => None,
+        })
     }
 
     /// Set a window's WM_STATE property.
