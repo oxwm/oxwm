@@ -33,6 +33,7 @@ enum ModMask {
     Mod3,
     Mod4,
     Mod5,
+    #[serde(skip_deserializing)]
     Any,
 }
 
@@ -78,15 +79,6 @@ pub enum FocusModel {
     Autofocus,
 }
 
-/// Type of "raw" configs, straight from the source.
-#[derive(PartialEq, Eq, Clone, Debug, Deserialize, Serialize)]
-struct RawConfig {
-    startup: Option<Vec<String>>,
-    mod_mask: Option<ModMask>,
-    focus_model: Option<FocusModel>,
-    keybinds: Option<HashMap<String, String>>,
-}
-
 /// Type of OxWM configs. Has to be parameterized by the connection type,
 /// because Rust doesn't have higher-rank types yet.
 #[derive(Clone, Deserialize, Serialize)]
@@ -100,8 +92,7 @@ pub(crate) struct Config<Conn> {
 
     pub(crate) focus_model: FocusModel,
 
-    #[serde(skip_deserializing)]
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
 
     #[serde(rename = "keybinds")]
@@ -136,7 +127,7 @@ where
 #[derive(
     PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash, Error, Deserialize, Serialize,
 )]
-#[error("unsupported platform (I don't know where to look for your config file)")]
+#[error("Unsupported platform (I don't know where to look for your config file)")]
 pub(crate) struct UnsupportedPlatformError;
 
 #[derive(Clone, Copy, Debug, Error, Deserialize, Serialize)]
@@ -176,12 +167,12 @@ impl<Conn> Config<Conn> {
     where
         Conn: Connection,
     {
-        let mut mostly_done: Self = toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)?;
-        mostly_done.translate_keybinds()?;
-        Ok(mostly_done)
+        let mut ret: Self = toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        ret.translate_keybinds()?;
+        Ok(ret)
     }
 
-    /// Populate the `keyBinds` variable with Keycodes `Action<Conn>` fn pointers
+    /// Populate `self.keybinds` with Keycodes and `Action<Conn>` fn pointers
     /// that match the Keysyms and action names found in `self.keybind_names`.
     fn translate_keybinds(&mut self) -> Result<()>
     where
@@ -191,22 +182,24 @@ impl<Conn> Config<Conn> {
             let keycode = match keysym_from_name(&key_name) {
                 None => Err(KeysymError(key_name.clone())),
                 Some(key_sym) => match keycode_from_keysym(key_sym) {
-                    None => Err(KeycodeError(key_sym)),
+                    None => Err(KeycodeError(key_name.clone(), key_sym)),
                     Some(key_code) => Ok(key_code),
                 },
             }?;
-            let action: Result<Action<Conn>> = match action_name.as_str() {
-                "kill" => Ok(OxWM::kill_focused_client),
+            let action: std::result::Result<Action<Conn>, ConfigError> = match action_name.as_str()
+            {
                 "quit" => Ok(OxWM::poison),
-                _ => Err(Box::new(InvalidAction(action_name.clone()))),
+                "kill" => Ok(OxWM::kill_focused_client),
+                _ => Err(InvalidAction(action_name.clone())),
             };
+
             self.keybinds.insert(keycode, action?);
         }
         Ok(())
     }
 
     /// Instantiate a default config which opens an xterm at startup, changes
-    /// focus on mouse click, terminates programs with Mod4 + w, and exits with Mod4 + Q.
+    /// focus on mouse click, kills windows with Mod4 + w, and exits with Mod4 + Q.
     pub fn new() -> Result<Self>
     where
         Conn: Connection,
@@ -218,24 +211,25 @@ impl<Conn> Config<Conn> {
 
     /// Instantiates a Config with default settings, but does NOT attempt to bind
     /// Keycodes and `Action<Conn>` fn pointers into the `keybinds` field.
-    /// Used both by `Config::new` and by derive[(Serialize)] on Config to fill in
+    /// Used by `Config::new`. Also used by derive[(Serialize)] on Config to fill in
     /// default values for any fields that aren't specified in the existing
-    /// Config.toml file. The serde derive macros don't like that Serialize isn't
-    /// specified for `x11rb::xproto::Connection`. By ommitting any references to
-    /// `Conn`/`Connection` in this function serde is allowed to serialize/deserialize
-    /// Config's directly. Callers to this function are expected to call the
-    /// `translate_keybinds()` function on the returned Config to populate the
-    /// keybinds.
+    /// Config.toml file.
+    /// The serde derive macros don't like that Serialize trait isn't specified for
+    /// `x11rb::xproto::Connection`. By ommitting any references to `Conn`/`Connection`
+    /// in this function serde is allowed to serialize/deserialize Config's directly.
+    /// Callers to this function are expected to call the `translate_keybinds()`
+    /// function of the returned Config to populate the keybind field.
     fn new_core() -> Self {
-        let startup: Vec<String> = vec!["xfce4-terminal".to_string()];
+        let startup: Vec<String> = vec!["xterm".to_string()];
         let mod_mask = ModMask::Mod4.into();
-        let focus_model = FocusModel::Autofocus;
-        //Deliberately not yet populated, callers are expected to call
+        let focus_model = FocusModel::Click;
+
+        // Deliberately left unpopulated, callers are expected to call the new
+        // Config object's translate_keybinds method to populate keybinds before use.
         let keybinds = HashMap::new();
         let mut keybind_names: HashMap<String, String> = HashMap::new();
         keybind_names.insert("q".to_string(), "quit".to_string());
         keybind_names.insert("w".to_string(), "kill".to_string());
-
         Self {
             startup,
             mod_mask,
@@ -247,7 +241,7 @@ impl<Conn> Config<Conn> {
 
     /// Write the config in .toml format to the default location:
     /// `<config directory>/oxwm/config.toml`
-    /// Jwhere `config_directory` is the location returned by `dirs::config_dir()`.
+    /// where `config_directory` is the location returned by `dirs::config_dir()`.
     /// Will create the `oxwm` directory if needed, will not create `config_directory`
     pub fn save(&self) -> Result<()>
     where
@@ -284,12 +278,12 @@ impl<Conn> Config<Conn> {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, Error)]
-pub enum ConfigError {
-    #[error("Error finding keysym for: {0}")]
+pub(crate) enum ConfigError {
+    #[error("Unrecodgnized key \"{0}\" in your Config.toml")]
     KeysymError(String),
-    #[error("Error finding keycode for: {0}")]
-    KeycodeError(xproto::Keysym),
-    #[error("Invalid action: {0}")]
+    #[error("X11 server does not have a Keycode assigned for \"{0}\" (Keysym: {1:#x})\nThis key may not be available in your current keyboard layout.")]
+    KeycodeError(String, xproto::Keysym),
+    #[error("Invalid action \"{0}\" found in your Config.toml")]
     InvalidAction(String),
 }
 use ConfigError::*;

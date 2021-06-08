@@ -57,10 +57,36 @@ impl<Conn> OxWM<Conn> {
         log::debug!("Loading config file.");
         // Load the config file first, since this is where errors are most
         // likely to occur.
-        let config = Config::load().or_else(|_| -> Result<Config<Conn>> {
+        let config = Config::load().or_else(|err| -> Result<Config<Conn>> {
+            //File access errors
+            if let Some(io_error) = err.downcast_ref::<std::io::Error>() {
+                match io_error.kind() {
+                    std::io::ErrorKind::NotFound => log::info!("Configuration file not found."),
+                    std::io::ErrorKind::PermissionDenied => {
+                        log::error!(
+                            "Permission denied trying to read configuration file, aborting"
+                        );
+                        return Err(err);
+                    }
+                    _ => return Err(err),
+                }
+            }
+            // Deserialization format errors
+            if let Some(de_error) = err.downcast_ref::<toml::de::Error>() {
+                log::error!("Failed to parse config.toml: {}", de_error);
+                return Err(err);
+            }
+            // Config.toml content errors
+            if let Some(config_error) = err.downcast_ref::<ConfigError>() {
+                log::error!("{}", config_error);
+                return Err(err);
+            };
             log::info!("Applying default configuration.");
-            let default_config = Config::new()?;
-            default_config.save()?;
+            let default_config = Config::new().unwrap();
+            default_config.save().map_err(|save_err| {
+                log::error!("{}", save_err);
+                save_err
+            })?;
             Ok(default_config)
         })?;
         // Grab the server so that we can do setup atomically. We don't need to
