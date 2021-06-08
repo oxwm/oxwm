@@ -59,7 +59,7 @@ impl<Conn> OxWM<Conn> {
         // likely to occur.
         let config = Config::load().or_else(|_| -> Result<Config<Conn>> {
             log::info!("Applying default configuration.");
-            let default_config = Config::new();
+            let default_config = Config::new()?;
             default_config.save()?;
             Ok(default_config)
         })?;

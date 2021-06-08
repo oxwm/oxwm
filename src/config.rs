@@ -3,12 +3,10 @@ use crate::OxWM;
 use crate::Result;
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use serde::ser::SerializeStruct;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -91,13 +89,48 @@ struct RawConfig {
 
 /// Type of OxWM configs. Has to be parameterized by the connection type,
 /// because Rust doesn't have higher-rank types yet.
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default = "Config::new_core")]
 pub(crate) struct Config<Conn> {
     pub(crate) startup: Vec<String>,
+
+    #[serde(deserialize_with = "deserialize_xproto_modmask")]
+    #[serde(serialize_with = "serialize_xproto_modmask")]
     pub(crate) mod_mask: xproto::ModMask,
+
     pub(crate) focus_model: FocusModel,
+
+    #[serde(skip_deserializing)]
+    #[serde(skip_serializing)]
     pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
-    pub(crate) keybind_names: HashMap<xproto::Keycode, String>,
+
+    #[serde(rename = "keybinds")]
+    pub(crate) keybind_names: HashMap<String, String>,
+}
+
+/// Deserialize an xproto::ModMask value by first deserializing into a
+/// Config::ModMask and converting from that to an xproto::ModMask.
+fn deserialize_xproto_modmask<'de, D>(
+    deserializer: D,
+) -> std::result::Result<xproto::ModMask, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let modm = ModMask::deserialize(deserializer)?;
+    Ok(xproto::ModMask::from(modm))
+}
+
+/// Serialize an xproto::ModMask by first converting it to a Config::ModMask
+/// and serializing that enum instead.
+fn serialize_xproto_modmask<S>(
+    source: &xproto::ModMask,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let modm = ModMask::from(source);
+    modm.serialize(serializer)
 }
 
 #[derive(
@@ -143,24 +176,65 @@ impl<Conn> Config<Conn> {
     where
         Conn: Connection,
     {
-        toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)
+        let mut mostly_done: Self = toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        mostly_done.translate_keybinds()?;
+        Ok(mostly_done)
+    }
+
+    /// Populate the `keyBinds` variable with Keycodes `Action<Conn>` fn pointers
+    /// that match the Keysyms and action names found in `self.keybind_names`.
+    fn translate_keybinds(&mut self) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        for (key_name, action_name) in &self.keybind_names {
+            let keycode = match keysym_from_name(&key_name) {
+                None => Err(KeysymError(key_name.clone())),
+                Some(key_sym) => match keycode_from_keysym(key_sym) {
+                    None => Err(KeycodeError(key_sym)),
+                    Some(key_code) => Ok(key_code),
+                },
+            }?;
+            let action: Result<Action<Conn>> = match action_name.as_str() {
+                "kill" => Ok(OxWM::kill_focused_client),
+                "quit" => Ok(OxWM::poison),
+                _ => Err(Box::new(InvalidAction(action_name.clone()))),
+            };
+            self.keybinds.insert(keycode, action?);
+        }
+        Ok(())
     }
 
     /// Instantiate a default config which opens an xterm at startup, changes
     /// focus on mouse click, terminates programs with Mod4 + w, and exits with Mod4 + Q.
-    pub fn new() -> Self
+    pub fn new() -> Result<Self>
     where
         Conn: Connection,
     {
-        let startup: Vec<String> = vec!["xterm".to_string()];
+        let mut ret = Config::new_core();
+        ret.translate_keybinds()?;
+        Ok(ret)
+    }
+
+    /// Instantiates a Config with default settings, but does NOT attempt to bind
+    /// Keycodes and `Action<Conn>` fn pointers into the `keybinds` field.
+    /// Used both by `Config::new` and by derive[(Serialize)] on Config to fill in
+    /// default values for any fields that aren't specified in the existing
+    /// Config.toml file. The serde derive macros don't like that Serialize isn't
+    /// specified for `x11rb::xproto::Connection`. By ommitting any references to
+    /// `Conn`/`Connection` in this function serde is allowed to serialize/deserialize
+    /// Config's directly. Callers to this function are expected to call the
+    /// `translate_keybinds()` function on the returned Config to populate the
+    /// keybinds.
+    fn new_core() -> Self {
+        let startup: Vec<String> = vec!["xfce4-terminal".to_string()];
         let mod_mask = ModMask::Mod4.into();
-        let focus_model = FocusModel::Click;
-        let mut keybinds: HashMap<xproto::Keycode, Action<Conn>> = HashMap::new();
-        let mut keybind_names: HashMap<xproto::Keycode, String> = HashMap::new();
-        keybinds.insert(24, OxWM::poison); //Q
-        keybind_names.insert(24, "quit".to_string());
-        keybinds.insert(25, OxWM::kill_focused_client); //W
-        keybind_names.insert(25, "kill".to_string());
+        let focus_model = FocusModel::Autofocus;
+        //Deliberately not yet populated, callers are expected to call
+        let keybinds = HashMap::new();
+        let mut keybind_names: HashMap<String, String> = HashMap::new();
+        keybind_names.insert("q".to_string(), "quit".to_string());
+        keybind_names.insert("w".to_string(), "kill".to_string());
 
         Self {
             startup,
@@ -210,7 +284,7 @@ impl<Conn> Config<Conn> {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug, Error)]
-enum ConfigError {
+pub enum ConfigError {
     #[error("Error finding keysym for: {0}")]
     KeysymError(String),
     #[error("Error finding keycode for: {0}")]
@@ -219,84 +293,3 @@ enum ConfigError {
     InvalidAction(String),
 }
 use ConfigError::*;
-
-impl<Conn> TryFrom<RawConfig> for Config<Conn>
-where
-    Conn: Connection,
-{
-    type Error = Box<dyn Error>;
-    fn try_from(raw: RawConfig) -> Result<Self> {
-        let startup = raw.startup.unwrap_or_default();
-        let mod_mask = raw.mod_mask.unwrap_or(ModMask::Mod4).into();
-        let focus_model = raw.focus_model.unwrap_or(FocusModel::Click);
-        let mut keybinds = HashMap::new();
-        //let mut keybind_names = HashMap::new();
-        let keybind_names = raw.keybinds.clone(); //Retain for later serialization
-        for (key_name, action_name) in raw.keybinds.unwrap_or_default() {
-            let keycode = match keysym_from_name(&key_name) {
-                None => Err(KeysymError(key_name)),
-                Some(key_sym) => match keycode_from_keysym(key_sym) {
-                    None => Err(KeycodeError(key_sym)),
-                    Some(key_code) => Ok(key_code),
-                },
-            }?;
-            let action: Result<Action<Conn>> = match action_name.as_str() {
-                "kill" => Ok(OxWM::kill_focused_client),
-                "quit" => Ok(OxWM::poison),
-                _ => Err(Box::new(InvalidAction(action_name.clone()))),
-            };
-            keybinds.insert(keycode, action?);
-            //keybind_names.insert(keycode, action_name);
-        }
-        Ok(Self {
-            startup,
-            mod_mask,
-            focus_model,
-            keybinds,
-            keybind_names,
-        })
-    }
-}
-
-impl<'de, Conn> Deserialize<'de> for Config<Conn>
-where
-    Conn: Connection,
-{
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = RawConfig::deserialize(deserializer)?;
-        Self::try_from(raw).map_err(|config_error| {
-            <D::Error as serde::de::Error>::custom(format!("{}", config_error))
-        })
-    }
-}
-
-impl<Conn> Serialize for Config<Conn>
-where
-    Conn: Connection,
-{
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut output = serializer.serialize_struct("Config", 4)?;
-        output.serialize_field("startup", &self.startup)?;
-        output.serialize_field("mod_mask", &ModMask::from(&self.mod_mask))?;
-        output.serialize_field("focus_model", &self.focus_model)?;
-
-        // Omit serializing self.keybinds directly: not trivial to convert from
-        // Action<Conn> to the strings they would be named by in a config.toml file.
-        // Use the corresponding strings mapped in self.keybind_names instead.
-        // Additionally toml::ser requires that keys for map types be Strings
-        // instead of integer types like xproto::Keycode. Convert to String first.
-        let keybind_names_by_string: HashMap<String, &String> = self
-            .keybind_names
-            .iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-        output.serialize_field("keybinds", &keybind_names_by_string)?;
-        output.end()
-    }
-}
