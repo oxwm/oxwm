@@ -236,8 +236,8 @@ impl<Conn> Config<Conn> {
         // Config object's translate_keybinds method to populate keybinds before use.
         let keybinds = HashMap::new();
         let mut keybind_names: HashMap<String, String> = HashMap::new();
-        keybind_names.insert("q".to_string(), "quit".to_string());
-        keybind_names.insert("w".to_string(), "kill".to_string());
+        keybind_names.insert("Escape".to_string(), "quit".to_string());
+        keybind_names.insert("q".to_string(), "kill".to_string());
         Self {
             startup,
             mod_mask,
@@ -288,7 +288,7 @@ impl<Conn> Config<Conn> {
 /// Errors relating to finding invalid but properly formed `Config.toml` contents.
 #[derive(PartialEq, Eq, Clone, Debug, Error)]
 pub(crate) enum ConfigError {
-    #[error("Unrecodgnized key \"{0}\" in your Config.toml")]
+    #[error("Unrecognized key \"{0}\" in your Config.toml")]
     KeysymError(String),
     #[error("X11 server does not have a Keycode assigned for \"{0}\" (Keysym: {1:#x})\nThis key may not be available in your current keyboard layout.")]
     KeycodeError(String, xproto::Keysym),
@@ -334,14 +334,14 @@ fn check_deserialize_defaults() {
     assert_eq!(a_config.startup, vec!["xterm"]);
     assert_eq!(a_config.mod_mask, xproto::ModMask::M4);
     assert_eq!(a_config.focus_model, FocusModel::Click);
-    assert!(a_config.keybind_names.contains_key("w"));
-    assert_eq!(a_config.keybind_names["w"], "kill");
     assert!(a_config.keybind_names.contains_key("q"));
-    assert_eq!(a_config.keybind_names["q"], "quit");
+    assert_eq!(a_config.keybind_names["q"], "kill");
+    assert!(a_config.keybind_names.contains_key("Escape"));
+    assert_eq!(a_config.keybind_names["Escape"], "quit");
     assert_eq!(a_config.keybind_names.len(), 2);
 
     let partial_toml =
-        "startup = [\"xterm\", \"xclock\"]\n[keybinds]\nF4 = \"kill\"\nEscape = \"quit\"\n";
+        "startup = [\"xterm\", \"xclock\"]\n[keybinds]\nF4 = \"kill\"\nq = \"quit\"\n";
     let response: std::result::Result<
         Config<x11rb::rust_connection::RustConnection>,
         toml::de::Error,
@@ -353,8 +353,8 @@ fn check_deserialize_defaults() {
     assert_eq!(a_config.focus_model, FocusModel::Click); // from defaults
     assert!(a_config.keybind_names.contains_key("F4"));
     assert_eq!(a_config.keybind_names["F4"], "kill");
-    assert!(a_config.keybind_names.contains_key("Escape"));
-    assert_eq!(a_config.keybind_names["Escape"], "quit");
+    assert!(a_config.keybind_names.contains_key("q"));
+    assert_eq!(a_config.keybind_names["q"], "quit");
     assert_eq!(a_config.keybind_names.len(), 2);
 }
 

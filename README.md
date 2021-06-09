@@ -1,3 +1,7 @@
+# OxWM
+
+OxWM is the Oxidized Window Manager, a minimal X11 window manager written in Rust.
+
 # Getting Started
 
 You might want to have a file named `oxwm/config.toml` in your platform-specific
@@ -18,8 +22,8 @@ q = "kill"
 This tells OxWM that `mod4` is the global modifier key, that OxWM should run
 `konsole` on startup, and that it should use a click-to-focus model. It also
 tells OxWM that, with the modifier key pressed, pressing the `Escape` key should
-exit, and pressing `q` should immediately abort the process of the focused
-window.
+exit, and pressing `q` should close the focused window, or immediately abort the
+process of the focused window if it cannot be closed.
 
 If you don't create this config file, one will be generated for you at the
 appropriate location.
@@ -54,7 +58,8 @@ it.
 Due to the nature of the program, very little automated testing is possible (as
 far as we know). In theory, it should be possible to create a "mock" X
 connection and drive it programmatically, but this would be a substantial
-undertaking.
+undertaking. Unit tests, as far as are possible without a functioning X connection,
+have been implemented for the `Clients` and `Config` types.
 
 # Future directions
 
@@ -65,3 +70,8 @@ abstractions, and fixing things will probably require a rewrite. This is not a
 crazy suggestion, since we didn't know anything about the X protocol when we
 started; knowing much more now, it should be easier to create a sound design
 from the start.
+
+# Authors
+
+* Nicholas Coltharp
+* James Nichols

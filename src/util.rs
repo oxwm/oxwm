@@ -17,8 +17,8 @@ pub fn event_mask_to_u16(mask: xproto::EventMask) -> u16 {
 }
 
 /// Lookup the numeric value for a given `Keysym`'s text name, e.g. "Shift_L" -> 50
-/// Returns `None` if the given `key_name` is not the name of a valid Keysym or
-/// contains `null` values.
+/// Returns `None` if `key_name` is not the name of a valid Keysym or contains
+/// `null` values.
 pub fn keysym_from_name(key_name: &str) -> Option<xproto::Keysym> {
     let sym64: u64;
 
@@ -67,7 +67,7 @@ pub fn keysym_from_name(key_name: &str) -> Option<xproto::Keysym> {
 
 /// An FFI call to the X11 C library function for converting from Keysym names
 /// to Keysym values. This is unsafe code. 'symbol' _must_ be a pointer to a
-/// null terminated C style string such as is produced by std::ffi::Cstring.
+/// null terminated C style string such as is produced by `std::ffi::Cstring`.
 #[link(name = "X11")]
 extern "C" {
     fn XStringToKeysym(symbol_name: *const c_char) -> c_ulong;
