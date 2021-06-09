@@ -1,6 +1,7 @@
 //! Local data about the state of the X server.
 
 use x11rb::connection::Connection;
+use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt as _;
 
@@ -8,7 +9,7 @@ use crate::atom::*;
 use crate::Result;
 
 /// Local data about a top-level window.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Client {
     /// The client window.
     pub(crate) window: xproto::Window,
@@ -25,7 +26,7 @@ impl Client {
 }
 
 /// Local data about the state of a top-level window.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ClientState {
     /// Horizontal position.
     pub(crate) x: i16,
@@ -41,6 +42,8 @@ pub(crate) struct ClientState {
     pub(crate) wm_protocols: WmProtocols,
     /// The client's WM_STATE.
     pub(crate) wm_state: Option<WmState>,
+    /// The client's WM_NORMAL_HINTS.
+    pub(crate) wm_normal_hints: WmSizeHints,
 }
 
 /// Local data about the state of all top-level windows. This includes windows
@@ -57,7 +60,7 @@ pub(crate) struct ClientState {
 /// * It is an error to try to insert two clients with the same window ID.
 /// * It is an error to try to perform an operation on a window ID for which
 ///   there is no corresponding client.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Clients {
     /// The window stack.
     // It feels wrong to use a vector, since we're going to be inserting and
@@ -122,61 +125,6 @@ impl Clients {
         self.stack.iter_mut()
     }
 
-    /// Initialize a new client stack by issuing queries to the server.
-    pub(crate) fn new<Conn>(conn: &Conn, screen: usize, atoms: &Atoms) -> Result<Self>
-    where
-        Conn: Connection,
-    {
-        let root = conn.setup().roots[screen].root;
-        let mut stack = Vec::new();
-        let children = conn.query_tree(root)?.reply()?.children;
-        // Fortunately, the server is guaranteed to return the windows in
-        // stacking order, from bottom to top.
-        for window in children {
-            let attrs = conn.get_window_attributes(window)?.reply()?;
-            let override_redirect = attrs.override_redirect;
-            let state = if override_redirect {
-                None
-            } else {
-                let geom = conn.get_geometry(window)?.reply()?;
-                let is_viewable = attrs.map_state == xproto::MapState::VIEWABLE;
-                let wm_protocols = atoms.get_wm_protocols(conn, window)?;
-                let wm_state = atoms.get_wm_state(conn, window)?;
-                Some(ClientState {
-                    x: geom.x,
-                    y: geom.y,
-                    width: geom.width,
-                    height: geom.height,
-                    is_viewable,
-                    wm_protocols,
-                    wm_state,
-                })
-            };
-            stack.push(Client { window, state })
-        }
-        let focus = conn.get_input_focus()?.reply()?.focus;
-        let focus = if stack.iter().find(|client| client.window == focus).is_none() {
-            None
-        } else {
-            Some(focus)
-        };
-        Ok(Clients { stack, focus })
-    }
-
-    /// Push a client on top of the stack.
-    pub(crate) fn push(&mut self, client: Client) {
-        debug_assert!(!self.stack.iter().any(|c| c.window == client.window));
-        self.stack.push(client);
-    }
-
-    /// Remove a client from the stack.
-    pub(crate) fn remove(&mut self, window: xproto::Window) {
-        self.stack.remove(self.get_with_index(window).0);
-        if self.focus == Some(window) {
-            self.focus = None;
-        }
-    }
-
     /// Move a client to just above another one.
     pub(crate) fn move_to_above(&mut self, window: xproto::Window, sibling: xproto::Window) {
         let (i, _) = self.get_with_index(window);
@@ -207,6 +155,63 @@ impl Clients {
         let (i, _) = self.get_with_index(window);
         let client = self.stack.remove(i);
         self.stack.push(client)
+    }
+
+    /// Initialize a new client stack by issuing queries to the server.
+    pub(crate) fn new<Conn>(conn: &Conn, screen: usize, atoms: &Atoms) -> Result<Self>
+    where
+        Conn: Connection,
+    {
+        let root = conn.setup().roots[screen].root;
+        let mut stack = Vec::new();
+        let children = conn.query_tree(root)?.reply()?.children;
+        // Fortunately, the server is guaranteed to return the windows in
+        // stacking order, from bottom to top.
+        for window in children {
+            let attrs = conn.get_window_attributes(window)?.reply()?;
+            let override_redirect = attrs.override_redirect;
+            let state = if override_redirect {
+                None
+            } else {
+                let geom = conn.get_geometry(window)?.reply()?;
+                let is_viewable = attrs.map_state == xproto::MapState::VIEWABLE;
+                let wm_protocols = atoms.get_wm_protocols(conn, window)?;
+                let wm_state = atoms.get_wm_state(conn, window)?;
+                let wm_normal_hints = atoms.get_wm_normal_hints(conn, window)?;
+                Some(ClientState {
+                    x: geom.x,
+                    y: geom.y,
+                    width: geom.width,
+                    height: geom.height,
+                    is_viewable,
+                    wm_protocols,
+                    wm_state,
+                    wm_normal_hints,
+                })
+            };
+            stack.push(Client { window, state })
+        }
+        let focus = conn.get_input_focus()?.reply()?.focus;
+        let focus = if stack.iter().find(|client| client.window == focus).is_none() {
+            None
+        } else {
+            Some(focus)
+        };
+        Ok(Clients { stack, focus })
+    }
+
+    /// Push a client on top of the stack.
+    pub(crate) fn push(&mut self, client: Client) {
+        debug_assert!(!self.stack.iter().any(|c| c.window == client.window));
+        self.stack.push(client);
+    }
+
+    /// Remove a client from the stack.
+    pub(crate) fn remove(&mut self, window: xproto::Window) {
+        self.stack.remove(self.get_with_index(window).0);
+        if self.focus == Some(window) {
+            self.focus = None;
+        }
     }
 
     /// Get the client that is on the top of the stack.
@@ -264,6 +269,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -277,6 +283,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -290,6 +297,7 @@ fn can_remove_focused_window() {
             is_viewable: false,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -303,6 +311,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -347,6 +356,7 @@ fn check_client_stacking() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -360,6 +370,7 @@ fn check_client_stacking() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -373,6 +384,7 @@ fn check_client_stacking() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -386,6 +398,7 @@ fn check_client_stacking() {
             is_viewable: false,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -399,6 +412,7 @@ fn check_client_stacking() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -437,7 +451,7 @@ fn check_client_stacking() {
         assert_eq!(iter.next().unwrap().window, 250);
         assert_eq!(iter.next().unwrap().window, 200);
         assert_eq!(iter.next().unwrap().window, 150);
-        assert_eq!(iter.next(), None);
+        assert!(iter.next().is_none())
     }
     assert_eq!(clients.top().window, 150);
     assert_eq!(clients.top_mut().window, 150);
@@ -449,7 +463,7 @@ fn check_client_stacking() {
         assert_eq!(iter.next().unwrap().window, 250);
         assert_eq!(iter.next().unwrap().window, 150);
         assert_eq!(iter.next().unwrap().window, 200);
-        assert_eq!(iter.next(), None);
+        assert!(iter.next().is_none())
     }
 
     clients.move_to_above(150, 200);
@@ -459,7 +473,7 @@ fn check_client_stacking() {
         assert_eq!(iter.next().unwrap().window, 250);
         assert_eq!(iter.next().unwrap().window, 200);
         assert_eq!(iter.next().unwrap().window, 150);
-        assert_eq!(iter.next(), None);
+        assert!(iter.next().is_none())
     }
 
     clients.move_to_above(250, 150);
@@ -469,7 +483,7 @@ fn check_client_stacking() {
         assert_eq!(iter.next().unwrap().window, 200);
         assert_eq!(iter.next().unwrap().window, 150);
         assert_eq!(iter.next().unwrap().window, 250);
-        assert_eq!(iter.next(), None);
+        assert!(iter.next().is_none())
     }
 }
 
@@ -492,6 +506,7 @@ fn check_get() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -505,6 +520,7 @@ fn check_get() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -540,6 +556,7 @@ fn check_get() {
                 is_viewable: true,
                 wm_protocols: WmProtocols::new(),
                 wm_state: None,
+                wm_normal_hints: WmSizeHints::new(),
             }),
         });
         let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
