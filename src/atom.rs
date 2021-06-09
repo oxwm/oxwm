@@ -1,3 +1,5 @@
+//! Atom management and medium-level routines for getting/setting properties.
+
 use std::convert::TryFrom;
 
 use x11rb::connection::Connection;
@@ -35,15 +37,15 @@ pub(crate) struct WmState {
 }
 
 impl From<WmState> for [u32; 2] {
-    fn from(st: WmState) -> [u32; 2] {
-        [u32::from(st.state), st.icon]
+    fn from(value: WmState) -> [u32; 2] {
+        [u32::from(value.state), value.icon]
     }
 }
 
-impl TryFrom<Vec<u32>> for WmState {
+impl TryFrom<&[u32]> for WmState {
     type Error = ();
 
-    fn try_from(value: Vec<u32>) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: &[u32]) -> std::result::Result<Self, Self::Error> {
         match value[..] {
             [state, icon] => Ok(WmState {
                 state: WmStateState::try_from(state)?,
@@ -66,8 +68,8 @@ pub(crate) enum WmStateState {
 }
 
 impl From<WmStateState> for u32 {
-    fn from(st: WmStateState) -> Self {
-        match st {
+    fn from(value: WmStateState) -> Self {
+        match value {
             WmStateState::Withdrawn => 0,
             WmStateState::Normal => 1,
             WmStateState::Iconic => 3,
@@ -228,7 +230,7 @@ impl Atoms {
             Some(x) => x,
         }
         .collect::<Vec<_>>();
-        Ok(match WmState::try_from(reply) {
+        Ok(match WmState::try_from(&reply[..]) {
             Ok(x) => Some(x),
             Err(_) => None,
         })

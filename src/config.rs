@@ -1,3 +1,5 @@
+//! Load config files.
+
 use crate::util::*;
 use crate::OxWM;
 use crate::Result;

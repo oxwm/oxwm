@@ -1,3 +1,5 @@
+//! The top-level window manager object.
+
 mod atom;
 mod client;
 mod config;

@@ -1,3 +1,5 @@
+//! Various assorted utility functions.
+
 use std::convert::TryFrom;
 use std::convert::TryInto;
 

@@ -1,3 +1,5 @@
+//! Local data about the state of the X server.
+
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt as _;
