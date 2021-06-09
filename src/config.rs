@@ -38,6 +38,7 @@ enum ModMask {
     Any,
 }
 
+/// Allow converting from a Config::Modmask to an xproto::Modmask
 impl From<ModMask> for xproto::ModMask {
     fn from(m: ModMask) -> Self {
         match m {
@@ -54,6 +55,7 @@ impl From<ModMask> for xproto::ModMask {
     }
 }
 
+/// Allow converting from an xproto::Modmask to a Config::Modmask
 impl ModMask {
     fn from(xm: &xproto::ModMask) -> Self {
         match *xm {
@@ -133,10 +135,13 @@ where
 #[error("Unsupported platform (I don't know where to look for your config file)")]
 pub(crate) struct UnsupportedPlatformError;
 
+/// An error indicating that we couldn't make the oxwm specific directory inside the user's
+/// config directory.
 #[derive(Clone, Copy, Debug, Error, Deserialize, Serialize)]
 #[error("Unable to create oxwm's configuration directory.")]
 pub(crate) struct CannotMakeConfigDirError;
 
+/// An error indicating that the user's config directory is missing or otherwise inaccessable.
 #[derive(Clone, Copy, Debug, Error, Deserialize, Serialize)]
 #[error("Unable to access your user's configuration directory.")]
 pub(crate) struct ConfigDirAccessError;
@@ -280,6 +285,7 @@ impl<Conn> Config<Conn> {
     }
 }
 
+/// Errors relating to finding invalid but properly formed `Config.toml` contents.
 #[derive(PartialEq, Eq, Clone, Debug, Error)]
 pub(crate) enum ConfigError {
     #[error("Unrecodgnized key \"{0}\" in your Config.toml")]
@@ -290,3 +296,119 @@ pub(crate) enum ConfigError {
     InvalidAction(String),
 }
 use ConfigError::*;
+
+/// Confirm that a usable `Config` can be produced by deserializing a Config.toml file.
+#[test]
+fn check_deserialize() {
+    // Cannot verify Config.keybinds as this requires querying an X11 server.
+    let good_toml =
+        "startup = [\"xterm\", \"xclock\"]\nmod_mask = \"mod3\"\nfocus_model = \"autofocus\"\n\n[keybinds]\nF4 = \"kill\"\nEscape = \"quit\"\n";
+    let response: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(good_toml);
+    assert!(response.is_ok());
+    let a_config = response.unwrap();
+    assert_eq!(a_config.startup, vec!["xterm", "xclock"]);
+    assert_eq!(a_config.mod_mask, xproto::ModMask::M3);
+    assert_eq!(a_config.focus_model, FocusModel::Autofocus);
+    assert!(a_config.keybind_names.contains_key("F4"));
+    assert_eq!(a_config.keybind_names["F4"], "kill");
+    assert!(a_config.keybind_names.contains_key("Escape"));
+    assert_eq!(a_config.keybind_names["Escape"], "quit");
+    assert_eq!(a_config.keybind_names.len(), 2);
+}
+
+/// Confirm that the `serde` / `toml` crates fill in missing information appropriately when deserializing from
+/// an incomplete Config.toml file.
+#[test]
+fn check_deserialize_defaults() {
+    // Cannot verify Config.keybinds as this requires querying an X11 server.
+    let empty_toml = "";
+    let response: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(empty_toml);
+    assert!(response.is_ok());
+    let a_config = response.unwrap();
+    assert_eq!(a_config.startup, vec!["xterm"]);
+    assert_eq!(a_config.mod_mask, xproto::ModMask::M4);
+    assert_eq!(a_config.focus_model, FocusModel::Click);
+    assert!(a_config.keybind_names.contains_key("w"));
+    assert_eq!(a_config.keybind_names["w"], "kill");
+    assert!(a_config.keybind_names.contains_key("q"));
+    assert_eq!(a_config.keybind_names["q"], "quit");
+    assert_eq!(a_config.keybind_names.len(), 2);
+
+    let partial_toml =
+        "startup = [\"xterm\", \"xclock\"]\n[keybinds]\nF4 = \"kill\"\nEscape = \"quit\"\n";
+    let response: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(partial_toml);
+    assert!(response.is_ok());
+    let a_config = response.unwrap();
+    assert_eq!(a_config.startup, vec!["xterm", "xclock"]);
+    assert_eq!(a_config.mod_mask, xproto::ModMask::M4); // from defaults
+    assert_eq!(a_config.focus_model, FocusModel::Click); // from defaults
+    assert!(a_config.keybind_names.contains_key("F4"));
+    assert_eq!(a_config.keybind_names["F4"], "kill");
+    assert!(a_config.keybind_names.contains_key("Escape"));
+    assert_eq!(a_config.keybind_names["Escape"], "quit");
+    assert_eq!(a_config.keybind_names.len(), 2);
+}
+
+/// Confirm that serialization via `serde` and `toml` crates produces expected results.
+#[test]
+fn check_serialize() {
+    let good_toml =
+        "startup = [\"xterm\", \"xclock\"]\nmod_mask = \"mod4\"\nfocus_model = \"click\"\n\n[keybinds]\nw = \"kill\"\nq = \"quit\"\n";
+    let alternate_toml =
+        "startup = [\"xterm\", \"xclock\"]\nmod_mask = \"mod4\"\nfocus_model = \"click\"\n\n[keybinds]\nq = \"quit\"\nw = \"kill\"\n";
+    let response_1: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(good_toml);
+    assert!(response_1.is_ok());
+    let a_config = response_1.unwrap();
+    let response_2: std::result::Result<String, toml::ser::Error> = toml::to_string(&a_config);
+    assert!(response_2.is_ok());
+    let maybe_toml = response_2.unwrap();
+    assert_eq!(
+        maybe_toml == good_toml || maybe_toml == alternate_toml,
+        true
+    );
+}
+
+/// Verify that deserializing into a Config object will fail on bad input.
+#[test]
+fn check_deserialize_errors() {
+    // Cannot test the full range of deserialization errors, as during testing an X11 server may
+    // not be available. An X11 server is required for `translate_keybinds` to map Keysyms to
+    // Keycodes when populating `Config.keybinds`.
+    let bad_mask_toml =
+        "startup = [\"xterm\", \"xclock\"]\nmod_mask = \"modulo4\"\nfocus_model = \"click\"\n\n[keybinds]\nw = \"kill\"\nq = \"quit\"\n";
+    let response_1: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(bad_mask_toml);
+    assert!(response_1.is_err());
+
+    let bad_focus_model_toml =
+        "startup = [\"xterm\", \"xclock\"]\nmod_mask = \"mod4\"\nfocus_model = \"let the cat decide\"\n\n[keybinds]\nw = \"kill\"\nq = \"quit\"\n";
+    let response_2: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(bad_focus_model_toml);
+    assert!(response_2.is_err());
+
+    // While `ModMask::Any` exists to permit conversions between ModMask and xproto::ModMask; we don't want to permit
+    // users to specify this value in Config.toml. Ensure it is rejected.
+    let any_mask_toml =
+        "startup = [\"xterm\", \"xclock\"]\nmod_mask = \"any\"\nfocus_model = \"click\"\n\n[keybinds]\nw = \"kill\"\nq = \"quit\"\n";
+    let response_3: std::result::Result<
+        Config<x11rb::rust_connection::RustConnection>,
+        toml::de::Error,
+    > = toml::from_str(any_mask_toml);
+    assert!(response_3.is_err());
+}

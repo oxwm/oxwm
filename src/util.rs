@@ -24,7 +24,7 @@ pub fn keysym_from_name(key_name: &str) -> Option<xproto::Keysym> {
 
     // Need: The X11 library is written in C, at this time we have been
     //       unable to find a working rust crate that offers equivalent
-    //       functionality or bindings to the `XStringToKeysym` function.
+    //       functionality or a binding to the `XStringToKeysym` function.
     //       Rather than reproduce this function in rust, we choose to call
     //       the X11 C library directly to perform the name to value lookup.
     //
@@ -34,7 +34,8 @@ pub fn keysym_from_name(key_name: &str) -> Option<xproto::Keysym> {
     //         read-only, and undefined behavior may result if the C function
     //         attempts to modify the strings contents.
     //
-    //         It is assumed that XStringToKeysym will not do this.
+    //         The assumption is made that XStringToKeysym in the X11 library
+    //         will not attempt to modify the memory we pass to it.
     //
     //         The C string is not reused after it has been passed to
     //         XStringToKeysym.
@@ -64,14 +65,17 @@ pub fn keysym_from_name(key_name: &str) -> Option<xproto::Keysym> {
     }
 }
 
-// An FFI to call the X11 C library function for converting from Keysym names
-// to Keysym values. This is unsafe code. 'symbol' _must_ be a pointer to a
-// null terminated C style string such as is produced by std::ffi::Cstring.
+/// An FFI call to the X11 C library function for converting from Keysym names
+/// to Keysym values. This is unsafe code. 'symbol' _must_ be a pointer to a
+/// null terminated C style string such as is produced by std::ffi::Cstring.
 #[link(name = "X11")]
 extern "C" {
     fn XStringToKeysym(symbol_name: *const c_char) -> c_ulong;
 }
 
+/// Query the running X11 server for the Keycode currently mapped, if any, to a Keysym.
+/// Unlike the majority of code in oxwm, this function uses the `xcb` and `xcb_util`
+/// crates instead of `x11rb` to interfacing with an X11 server.
 pub fn keycode_from_keysym(keysym_value: xproto::Keysym) -> Option<xproto::Keycode> {
     if let Ok((xcb_conn, _screen)) = xcb::Connection::connect(None) {
         let converter = xcb_util::keysyms::KeySymbols::new(&xcb_conn);
