@@ -1,6 +1,7 @@
 //! Local data about the state of the X server.
 
 use x11rb::connection::Connection;
+use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt as _;
 
@@ -8,7 +9,7 @@ use crate::atom::*;
 use crate::Result;
 
 /// Local data about a top-level window.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Client {
     /// The client window.
     pub(crate) window: xproto::Window,
@@ -25,7 +26,7 @@ impl Client {
 }
 
 /// Local data about the state of a top-level window.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ClientState {
     /// Horizontal position.
     pub(crate) x: i16,
@@ -41,6 +42,8 @@ pub(crate) struct ClientState {
     pub(crate) wm_protocols: WmProtocols,
     /// The client's WM_STATE.
     pub(crate) wm_state: Option<WmState>,
+    /// The client's WM_SIZE_HINTS.
+    pub(crate) wm_size_hints: WmSizeHints,
 }
 
 /// Local data about the state of all top-level windows. This includes windows
@@ -57,7 +60,7 @@ pub(crate) struct ClientState {
 /// * It is an error to try to insert two clients with the same window ID.
 /// * It is an error to try to perform an operation on a window ID for which
 ///   there is no corresponding client.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Clients {
     /// The window stack.
     // It feels wrong to use a vector, since we're going to be inserting and
@@ -145,6 +148,7 @@ impl Clients {
                 let is_viewable = attrs.map_state == xproto::MapState::VIEWABLE;
                 let wm_protocols = atoms.get_wm_protocols(conn, window)?;
                 let wm_state = atoms.get_wm_state(conn, window)?;
+                let wm_size_hints = atoms.get_wm_size_hints(conn, window)?;
                 Some(ClientState {
                     x: geom.x,
                     y: geom.y,
@@ -153,6 +157,7 @@ impl Clients {
                     is_viewable,
                     wm_protocols,
                     wm_state,
+                    wm_size_hints,
                 })
             };
             stack.push(Client { window, state })
@@ -262,6 +267,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_size_hints: WmSizeHints::new(),
         }),
     });
 
@@ -275,6 +281,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_size_hints: WmSizeHints::new(),
         }),
     });
 
@@ -288,6 +295,7 @@ fn can_remove_focused_window() {
             is_viewable: false,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_size_hints: WmSizeHints::new(),
         }),
     });
 
@@ -301,6 +309,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
+            wm_size_hints: WmSizeHints::new(),
         }),
     });
 

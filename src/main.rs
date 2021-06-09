@@ -276,6 +276,7 @@ impl<Conn> OxWM<Conn> {
                                     state: WmStateState::Withdrawn,
                                     icon: x11rb::NONE,
                                 }),
+                                wm_size_hints: self.atoms.get_wm_size_hints(&self.conn, window)?,
                             })
                         },
                     });
@@ -430,6 +431,14 @@ impl<Conn> OxWM<Conn> {
                             .as_mut()
                             .unwrap()
                             .wm_state = self.atoms.get_wm_state(&self.conn, window)?;
+                    } else if ev.atom == xproto::AtomEnum::WM_SIZE_HINTS.into() {
+                        log::debug!("Updating WM_SIZE_HINTS.");
+                        self.clients
+                            .get_mut(window)
+                            .state
+                            .as_mut()
+                            .unwrap()
+                            .wm_size_hints = self.atoms.get_wm_size_hints(&self.conn, window)?
                     } else {
                         log::warn!("Ignoring.");
                     }
