@@ -227,9 +227,9 @@ impl<Conn> OxWM<Conn> {
                 ButtonRelease(_) => self.drag = None,
                 ConfigureNotify(ev) => {
                     if ev.above_sibling == x11rb::NONE {
-                        self.clients.to_bottom(ev.window);
+                        self.clients.move_to_bottom(ev.window);
                     } else {
-                        self.clients.to_above(ev.window, ev.above_sibling);
+                        self.clients.move_to_above(ev.window, ev.above_sibling);
                     }
                     if let Some(ref mut st) = self.clients.get_mut(ev.window).state {
                         st.x = ev.x;
@@ -343,12 +343,12 @@ impl<Conn> OxWM<Conn> {
                 MotionNotify(ev) => {
                     let drag = self.drag.as_ref().unwrap();
                     let config = match drag.type_ {
-                        DragType::MOVE => {
+                        DragType::Move => {
                             let x = (ev.root_x - drag.x) as i32;
                             let y = (ev.root_y - drag.y) as i32;
                             ConfigureWindowAux::new().x(x).y(y)
                         }
-                        DragType::RESIZE(corner) => {
+                        DragType::Resize(corner) => {
                             let st = self.clients.get_mut(ev.event).state.as_ref().unwrap();
                             match corner {
                                 Corner::LeftTop => {
@@ -462,7 +462,7 @@ impl<Conn> OxWM<Conn> {
     fn begin_drag(&mut self, window: xproto::Window, button: xproto::Button, x: i16, y: i16) {
         let st = self.clients.get(window).state.as_ref().unwrap();
         let (type_, corner) = match button {
-            1 => (DragType::MOVE, Corner::LeftTop),
+            1 => (DragType::Move, Corner::LeftTop),
             3 => {
                 // We resize from whatever corner the pointer is
                 // closest to.
@@ -474,7 +474,7 @@ impl<Conn> OxWM<Conn> {
                     (true, false) => Corner::RightTop,
                     (true, true) => Corner::RightBottom,
                 };
-                (DragType::RESIZE(corner), corner)
+                (DragType::Resize(corner), corner)
             }
             _ => {
                 log::error!("Invalid button.");
@@ -702,9 +702,9 @@ impl Corner {
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Debug)]
 enum DragType {
     /// A moving drag.
-    MOVE,
+    Move,
     /// A resizing drag.
-    RESIZE(Corner),
+    Resize(Corner),
 }
 
 /// The state of a window drag.

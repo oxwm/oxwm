@@ -109,19 +109,16 @@ impl Clients {
 
     /// Indicates whether a client corresponding to the given window exists.
     pub(crate) fn has_client(&self, window: xproto::Window) -> bool {
-        self.stack
-            .iter()
-            .find(|client| client.window == window)
-            .is_some()
+        self.stack.iter().any(|client| client.window == window)
     }
 
     /// Get an iterator over the stack, from bottom to top.
-    pub(crate) fn iter<'a>(&'a self) -> impl DoubleEndedIterator<Item = &'a Client> {
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &Client> {
         self.stack.iter()
     }
 
     /// Get an iterator over the stack, from bottom to top.
-    pub(crate) fn iter_mut<'a>(&'a mut self) -> impl DoubleEndedIterator<Item = &'a mut Client> {
+    pub(crate) fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Client> {
         self.stack.iter_mut()
     }
 
@@ -181,7 +178,7 @@ impl Clients {
     }
 
     /// Move a client to just above another one.
-    pub(crate) fn to_above(&mut self, window: xproto::Window, sibling: xproto::Window) {
+    pub(crate) fn move_to_above(&mut self, window: xproto::Window, sibling: xproto::Window) {
         let (i, _) = self.get_with_index(window);
         if i > 0 && self.stack[i - 1].window == sibling {
             return;
@@ -192,7 +189,7 @@ impl Clients {
     }
 
     /// Lower a client to the bottom of the stack.
-    pub(crate) fn to_bottom(&mut self, window: xproto::Window) {
+    pub(crate) fn move_to_bottom(&mut self, window: xproto::Window) {
         if self.stack.first().unwrap().window == window {
             return;
         }
@@ -203,7 +200,7 @@ impl Clients {
 
     /// Raise a client to the top of the stack.
     #[allow(dead_code)]
-    pub(crate) fn to_top(&mut self, window: xproto::Window) {
+    pub(crate) fn move_to_top(&mut self, window: xproto::Window) {
         if self.top().window == window {
             return;
         }
@@ -418,7 +415,7 @@ fn check_client_stacking() {
     assert_eq!(clients.has_client(300), false);
     assert_eq!(clients.has_client(675), false);
 
-    clients.to_above(100, 250);
+    clients.move_to_above(100, 250);
     //150,200,250,100
     assert_eq!(clients.top().window, 100);
     assert_eq!(clients.top_mut().window, 100);
@@ -428,12 +425,12 @@ fn check_client_stacking() {
     assert_eq!(clients.top().window, 250);
     assert_eq!(clients.top_mut().window, 250);
 
-    clients.to_top(150);
+    clients.move_to_top(150);
     //200,250,150
     assert_eq!(clients.top().window, 150);
     assert_eq!(clients.top_mut().window, 150);
 
-    clients.to_bottom(250);
+    clients.move_to_bottom(250);
     //250,200,150
     {
         let mut iter = clients.iter();
@@ -445,7 +442,7 @@ fn check_client_stacking() {
     assert_eq!(clients.top().window, 150);
     assert_eq!(clients.top_mut().window, 150);
 
-    clients.to_above(150, 250);
+    clients.move_to_above(150, 250);
     //250,150,200
     {
         let mut iter = clients.iter();
@@ -455,7 +452,7 @@ fn check_client_stacking() {
         assert_eq!(iter.next(), None);
     }
 
-    clients.to_above(150, 200);
+    clients.move_to_above(150, 200);
     //250,200,150
     {
         let mut iter = clients.iter();
@@ -465,7 +462,7 @@ fn check_client_stacking() {
         assert_eq!(iter.next(), None);
     }
 
-    clients.to_above(250, 150);
+    clients.move_to_above(250, 150);
     //200,150,250?
     {
         let mut iter = clients.iter();
