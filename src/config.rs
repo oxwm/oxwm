@@ -3,7 +3,6 @@ use crate::OxWM;
 use crate::Result;
 
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs;
 use std::path::Path;
 
@@ -84,17 +83,18 @@ pub enum FocusModel {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default = "Config::new_core")]
 pub(crate) struct Config<Conn> {
+    /// Startup programs.
     pub(crate) startup: Vec<String>,
-
+    /// Global modifier key mask.
     #[serde(deserialize_with = "deserialize_xproto_modmask")]
     #[serde(serialize_with = "serialize_xproto_modmask")]
     pub(crate) mod_mask: xproto::ModMask,
-
+    /// Focus model.
     pub(crate) focus_model: FocusModel,
-
+    /// Active keybinds for running window manager.
     #[serde(skip)]
     pub(crate) keybinds: HashMap<xproto::Keycode, Action<Conn>>,
-
+    /// Keybinds as represented in Config.toml.
     #[serde(rename = "keybinds")]
     pub(crate) keybind_names: HashMap<String, String>,
 }
@@ -167,7 +167,7 @@ impl<Conn> Config<Conn> {
     where
         Conn: Connection,
     {
-        let mut ret: Self = toml::from_str(s).map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        let mut ret: Self = toml::from_str(s)?;
         ret.translate_keybinds()?;
         Ok(ret)
     }
