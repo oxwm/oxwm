@@ -112,20 +112,49 @@ impl Clients {
 
     /// Indicates whether a client corresponding to the given window exists.
     pub(crate) fn has_client(&self, window: xproto::Window) -> bool {
-        self.stack
-            .iter()
-            .find(|client| client.window == window)
-            .is_some()
+        self.stack.iter().any(|client| client.window == window)
     }
 
     /// Get an iterator over the stack, from bottom to top.
-    pub(crate) fn iter<'a>(&'a self) -> impl DoubleEndedIterator<Item = &'a Client> {
+    pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &Client> {
         self.stack.iter()
     }
 
     /// Get an iterator over the stack, from bottom to top.
-    pub(crate) fn iter_mut<'a>(&'a mut self) -> impl DoubleEndedIterator<Item = &'a mut Client> {
+    pub(crate) fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut Client> {
         self.stack.iter_mut()
+    }
+
+    /// Move a client to just above another one.
+    pub(crate) fn move_to_above(&mut self, window: xproto::Window, sibling: xproto::Window) {
+        let (i, _) = self.get_with_index(window);
+        if i > 0 && self.stack[i - 1].window == sibling {
+            return;
+        }
+        let client = self.stack.remove(i);
+        let (j, _) = self.get_with_index(sibling);
+        self.stack.insert(j + 1, client);
+    }
+
+    /// Lower a client to the bottom of the stack.
+    pub(crate) fn move_to_bottom(&mut self, window: xproto::Window) {
+        if self.stack.first().unwrap().window == window {
+            return;
+        }
+        let (i, _) = self.get_with_index(window);
+        let client = self.stack.remove(i);
+        self.stack.insert(0, client);
+    }
+
+    /// Raise a client to the top of the stack.
+    #[allow(dead_code)]
+    pub(crate) fn move_to_top(&mut self, window: xproto::Window) {
+        if self.top().window == window {
+            return;
+        }
+        let (i, _) = self.get_with_index(window);
+        let client = self.stack.remove(i);
+        self.stack.push(client)
     }
 
     /// Initialize a new client stack by issuing queries to the server.
@@ -183,38 +212,6 @@ impl Clients {
         if self.focus == Some(window) {
             self.focus = None;
         }
-    }
-
-    /// Move a client to just above another one.
-    pub(crate) fn to_above(&mut self, window: xproto::Window, sibling: xproto::Window) {
-        let (i, _) = self.get_with_index(window);
-        if i > 0 && self.stack[i - 1].window == sibling {
-            return;
-        }
-        let client = self.stack.remove(i);
-        let (j, _) = self.get_with_index(sibling);
-        self.stack.insert(j + 1, client);
-    }
-
-    /// Lower a client to the bottom of the stack.
-    pub(crate) fn to_bottom(&mut self, window: xproto::Window) {
-        if self.stack.first().unwrap().window == window {
-            return;
-        }
-        let (i, _) = self.get_with_index(window);
-        let client = self.stack.remove(i);
-        self.stack.insert(0, client);
-    }
-
-    /// Raise a client to the top of the stack.
-    #[allow(dead_code)]
-    pub(crate) fn to_top(&mut self, window: xproto::Window) {
-        if self.top().window == window {
-            return;
-        }
-        let (i, _) = self.get_with_index(window);
-        let client = self.stack.remove(i);
-        self.stack.push(client)
     }
 
     /// Get the client that is on the top of the stack.
