@@ -42,8 +42,8 @@ pub(crate) struct ClientState {
     pub(crate) wm_protocols: WmProtocols,
     /// The client's WM_STATE.
     pub(crate) wm_state: Option<WmState>,
-    /// The client's WM_SIZE_HINTS.
-    pub(crate) wm_size_hints: WmSizeHints,
+    /// The client's WM_NORMAL_HINTS.
+    pub(crate) wm_normal_hints: WmSizeHints,
 }
 
 /// Local data about the state of all top-level windows. This includes windows
@@ -148,7 +148,7 @@ impl Clients {
                 let is_viewable = attrs.map_state == xproto::MapState::VIEWABLE;
                 let wm_protocols = atoms.get_wm_protocols(conn, window)?;
                 let wm_state = atoms.get_wm_state(conn, window)?;
-                let wm_size_hints = atoms.get_wm_size_hints(conn, window)?;
+                let wm_normal_hints = atoms.get_wm_normal_hints(conn, window)?;
                 Some(ClientState {
                     x: geom.x,
                     y: geom.y,
@@ -157,7 +157,7 @@ impl Clients {
                     is_viewable,
                     wm_protocols,
                     wm_state,
-                    wm_size_hints,
+                    wm_normal_hints,
                 })
             };
             stack.push(Client { window, state })
@@ -267,7 +267,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
-            wm_size_hints: WmSizeHints::new(),
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -281,7 +281,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
-            wm_size_hints: WmSizeHints::new(),
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -295,7 +295,7 @@ fn can_remove_focused_window() {
             is_viewable: false,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
-            wm_size_hints: WmSizeHints::new(),
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 
@@ -309,7 +309,7 @@ fn can_remove_focused_window() {
             is_viewable: true,
             wm_protocols: WmProtocols::new(),
             wm_state: None,
-            wm_size_hints: WmSizeHints::new(),
+            wm_normal_hints: WmSizeHints::new(),
         }),
     });
 

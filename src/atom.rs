@@ -1,11 +1,13 @@
-//! Atom management and medium-level routines for getting/setting properties.
+//! Atom management and mid-level routines for getting/setting properties.
 
 use std::convert::TryFrom;
 
 use x11rb::connection::Connection;
+use x11rb::errors::ConnectionError;
 use x11rb::properties::WmSizeHints;
 use x11rb::protocol::xproto;
 use x11rb::protocol::xproto::ConnectionExt as _;
+use x11rb::rust_connection::ReplyError;
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::Result;
@@ -93,7 +95,7 @@ impl TryFrom<u32> for WmStateState {
 
 /// Keeps track of standard ICCCM atoms, and provides a few functions for
 /// getting/setting certain properties.
-pub struct Atoms {
+pub(crate) struct Atoms {
     /// The interned WM_DELETE_WINDOW atom.
     pub(crate) wm_delete_window: xproto::Atom,
     /// The interned WM_PROTOCOLS atom.
@@ -214,7 +216,8 @@ impl Atoms {
         Ok(ret)
     }
 
-    pub(crate) fn get_wm_size_hints<Conn>(
+    /// Get a window's WM_NORMAL_HINTS property
+    pub(crate) fn get_wm_normal_hints<Conn>(
         &self,
         conn: &Conn,
         window: xproto::Window,
@@ -222,7 +225,13 @@ impl Atoms {
     where
         Conn: Connection,
     {
-        Ok(WmSizeHints::get(conn, window, xproto::AtomEnum::WM_SIZE_HINTS)?.reply()?)
+        match WmSizeHints::get(conn, window, xproto::AtomEnum::WM_NORMAL_HINTS)?.reply() {
+            Ok(x) => Ok(x),
+            Err(ReplyError::ConnectionError(ConnectionError::ParseError(_))) => {
+                Ok(WmSizeHints::new())
+            }
+            Err(err) => Err(Box::new(err)),
+        }
     }
 
     /// Get a window's WM_STATE property.

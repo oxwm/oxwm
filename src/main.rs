@@ -20,14 +20,18 @@ use config::*;
 use util::*;
 
 /// General-purpose result type. Not very precise, but we're not actually doing
-/// anything with errors other than letting them bubble up to the user, so this
-/// is fine for now.
+/// much with errors other than letting them bubble up to the user, so this is
+/// fine for now.
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// Minimum client width.
-const MIN_WIDTH: u32 = 256;
+/// Default minimum client width.
+const MIN_WIDTH: u16 = 128;
+/// Default maximum client width.
+const MAX_WIDTH: u16 = 16384;
 /// Minimum client height.
-const MIN_HEIGHT: u32 = 256;
+const MIN_HEIGHT: u16 = 128;
+/// Default maximum client width.
+const MAX_HEIGHT: u16 = 16384;
 
 pub(crate) struct OxWM<Conn> {
     /// The source of all our problems.
@@ -59,6 +63,8 @@ impl<Conn> OxWM<Conn> {
         log::debug!("Loading config file.");
         // Load the config file first, since this is where errors are most
         // likely to occur.
+        //
+        // (Well, that's probably not true right now, but IN THEORY...)
         let config = Config::load().or_else(|err| -> Result<Config<Conn>> {
             //File access errors
             if let Some(io_error) = err.downcast_ref::<std::io::Error>() {
@@ -152,7 +158,7 @@ impl<Conn> OxWM<Conn> {
     {
         log::debug!("Managing extant clients.");
         for client in self.clients.iter() {
-            self.manage(client.window)?;
+            self.manage(&client)?;
         }
         Ok(())
     }
@@ -239,48 +245,34 @@ impl<Conn> OxWM<Conn> {
                     }
                 }
                 ConfigureRequest(ev) => {
+                    let st = self.clients.get(ev.window).state.as_ref().unwrap();
+                    let (min_width, min_height) = st
+                        .wm_normal_hints
+                        .min_size
+                        .unwrap_or((MIN_WIDTH as i32, MIN_HEIGHT as i32));
+                    let (max_width, max_height) = st
+                        .wm_normal_hints
+                        .max_size
+                        .unwrap_or((MAX_WIDTH as i32, MAX_HEIGHT as i32));
                     let mut value_list = xproto::ConfigureWindowAux::from_configure_request(&ev);
                     // Windows that have override-redirect set can do whatever they want.
                     if !self.clients.get(ev.window).override_redirect() {
-                        value_list.width = value_list.width.map(|w| w.max(MIN_WIDTH));
-                        value_list.height = value_list.height.map(|h| h.max(MIN_HEIGHT));
+                        value_list.width = value_list
+                            .width
+                            .map(|w| w.max(min_width as u32).min(max_width as u32));
+                        value_list.height = value_list
+                            .height
+                            .map(|h| h.max(min_height as u32).min(max_height as u32));
                     }
                     if let Err(e) = self.conn.configure_window(ev.window, &value_list)?.check() {
                         // The window might have already been destroyed!
                         log::warn!("{:?}", e);
                     }
                 }
-                CreateNotify(ev) => {
-                    let window = ev.window;
-                    if !ev.override_redirect {
-                        if let Err(err) = self.manage(window) {
-                            // Believe it or not, the window could have already
-                            // been destroyed. (This is becoming a problem.)
-                            log::warn!("{:?}", err);
-                            continue;
-                        }
-                    }
-                    self.clients.push(Client {
-                        window,
-                        state: if ev.override_redirect {
-                            None
-                        } else {
-                            Some(ClientState {
-                                x: ev.x,
-                                y: ev.y,
-                                width: ev.width,
-                                height: ev.height,
-                                is_viewable: false,
-                                wm_protocols: self.atoms.get_wm_protocols(&self.conn, window)?,
-                                wm_state: Some(WmState {
-                                    state: WmStateState::Withdrawn,
-                                    icon: x11rb::NONE,
-                                }),
-                                wm_size_hints: self.atoms.get_wm_size_hints(&self.conn, window)?,
-                            })
-                        },
-                    });
-                }
+                CreateNotify(ev) => match self.create_notify(ev) {
+                    Ok(_) => (),
+                    Err(err) => log::warn!("{:?}", err),
+                },
                 DestroyNotify(ev) => {
                     let window = ev.window;
                     if let Some(client) = self.clients.get_focus() {
@@ -342,105 +334,125 @@ impl<Conn> OxWM<Conn> {
                 }
                 MapRequest(ev) => self.conn.map_window(ev.window)?.check()?,
                 MotionNotify(ev) => {
+                    let st = self.clients.get(ev.event).state.as_ref().unwrap();
+                    let (min_width, min_height) = st
+                        .wm_normal_hints
+                        .min_size
+                        .unwrap_or((MIN_WIDTH as i32, MIN_HEIGHT as i32));
+                    let (max_width, max_height) = st
+                        .wm_normal_hints
+                        .max_size
+                        .unwrap_or((MAX_WIDTH as i32, MAX_HEIGHT as i32));
                     let drag = self.drag.as_ref().unwrap();
-                    let config = match drag.type_ {
+                    let mut config = match drag.type_ {
                         DragType::MOVE => {
                             let x = (ev.root_x - drag.x) as i32;
                             let y = (ev.root_y - drag.y) as i32;
                             ConfigureWindowAux::new().x(x).y(y)
                         }
-                        DragType::RESIZE(corner) => {
-                            let st = self.clients.get_mut(ev.event).state.as_ref().unwrap();
-                            match corner {
-                                Corner::LeftTop => {
-                                    let mut x = ev.root_x - drag.x;
-                                    let mut width = st.width as i32 - ((x - st.x) as i32);
-                                    if width < MIN_WIDTH as i32 {
-                                        width = MIN_WIDTH as i32;
-                                        x = st.x;
-                                    }
-                                    let width = width as u32;
-                                    let x = x as i32;
-                                    let mut y = ev.root_y - drag.y;
-                                    let mut height = st.height as i32 - ((y - st.y) as i32);
-                                    if height < MIN_HEIGHT as i32 {
-                                        height = MIN_HEIGHT as i32;
-                                        y = st.y;
-                                    }
-                                    let height = height as u32;
-                                    let y = y as i32;
-                                    ConfigureWindowAux::new()
-                                        .x(x)
-                                        .y(y)
-                                        .width(width)
-                                        .height(height)
+                        DragType::RESIZE(corner) => match corner {
+                            Corner::LeftTop => {
+                                let mut x = ev.root_x - drag.x;
+                                let mut width = st.width as i32 - ((x - st.x) as i32);
+                                if width < min_width {
+                                    width = min_width;
+                                    x = ((st.x as i32) + (st.width as i32 - width)) as i16;
+                                } else if width > max_width {
+                                    width = max_width;
+                                    x = ((st.x as i32) + (st.width as i32 - width)) as i16;
                                 }
-                                Corner::LeftBottom => {
-                                    let height =
-                                        ((ev.event_y - drag.y).max(0) as u32).max(MIN_HEIGHT);
-                                    let mut x = ev.root_x - drag.x;
-                                    let mut width = st.width as i32 - ((x - st.x) as i32);
-                                    if width < MIN_WIDTH as i32 {
-                                        width = MIN_WIDTH as i32;
-                                        x = st.x;
-                                    }
-                                    let width = width as u32;
-                                    let x = x as i32;
-                                    ConfigureWindowAux::new().x(x).width(width).height(height)
+                                let width = width as u32;
+                                let x = x as i32;
+                                let mut y = ev.root_y - drag.y;
+                                let mut height = st.height as i32 - ((y - st.y) as i32);
+                                if height < min_height {
+                                    height = min_height;
+                                    y = ((st.y as i32) + (st.height as i32 - height)) as i16;
+                                } else if height > max_height {
+                                    height = max_height;
+                                    y = ((st.y as i32) + (st.height as i32 - height)) as i16;
                                 }
-                                Corner::RightTop => {
-                                    let width =
-                                        ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
-                                    let mut y = ev.root_y - drag.y;
-                                    let mut height = st.height as i32 - ((y - st.y) as i32);
-                                    if height < MIN_HEIGHT as i32 {
-                                        height = MIN_HEIGHT as i32;
-                                        y = st.y;
-                                    }
-                                    let height = height as u32;
-                                    let y = y as i32;
-                                    ConfigureWindowAux::new().y(y).width(width).height(height)
-                                }
-                                Corner::RightBottom => {
-                                    let width =
-                                        ((ev.event_x - drag.x).max(0) as u32).max(MIN_WIDTH);
-                                    let height =
-                                        ((ev.event_y - drag.y).max(0) as u32).max(MIN_WIDTH);
-                                    ConfigureWindowAux::new().width(width).height(height)
-                                }
+                                let height = height as u32;
+                                let y = y as i32;
+                                ConfigureWindowAux::new()
+                                    .x(x)
+                                    .y(y)
+                                    .width(width)
+                                    .height(height)
                             }
-                        }
+                            Corner::LeftBottom => {
+                                let height = ((ev.event_y - drag.y).max(0) as i32)
+                                    .max(min_height)
+                                    .min(max_height)
+                                    as u32;
+                                let mut x = ev.root_x - drag.x;
+                                let mut width = st.width as i32 - ((x - st.x) as i32);
+                                if width < min_width {
+                                    width = min_width;
+                                    x = ((st.x as i32) + (st.width as i32 - width)) as i16;
+                                } else if width > max_width {
+                                    width = max_width;
+                                    x = ((st.x as i32) + (st.width as i32 - width)) as i16;
+                                }
+                                let width = width as u32;
+                                let x = x as i32;
+                                ConfigureWindowAux::new().x(x).width(width).height(height)
+                            }
+                            Corner::RightTop => {
+                                let width = ((ev.event_x - drag.x).max(0) as i32)
+                                    .max(min_width)
+                                    .min(max_width)
+                                    as u32;
+                                let mut y = ev.root_y - drag.y;
+                                let mut height = st.height as i32 - ((y - st.y) as i32);
+                                if height < min_height {
+                                    height = min_height;
+                                    y = ((st.y as i32) + (st.height as i32 - height)) as i16;
+                                } else if height > max_height {
+                                    height = max_height;
+                                    y = ((st.y as i32) + (st.height as i32 - height)) as i16;
+                                }
+                                let height = height as u32;
+                                let y = y as i32;
+                                ConfigureWindowAux::new().y(y).width(width).height(height)
+                            }
+                            Corner::RightBottom => {
+                                let width = ((ev.event_x - drag.x).max(0) as i32)
+                                    .max(min_width)
+                                    .min(max_height)
+                                    as u32;
+                                let height = ((ev.event_y - drag.y).max(0) as i32)
+                                    .max(min_height)
+                                    .min(max_height)
+                                    as u32;
+                                ConfigureWindowAux::new().width(width).height(height)
+                            }
+                        },
                     };
+                    if let (Some((base_width, base_height)), Some((width_inc, height_inc))) = (
+                        st.wm_normal_hints.base_size,
+                        st.wm_normal_hints.size_increment,
+                    ) {
+                        let base_width = base_width as u32;
+                        let base_height = base_height as u32;
+                        let width_inc = width_inc as u32;
+                        let height_inc = height_inc as u32;
+                        if let Some(width) = config.width {
+                            let units = (width - base_width) / width_inc;
+                            let pixels = units * width_inc;
+                            config.width = Some(base_width + pixels);
+                        }
+                        if let Some(height) = config.height {
+                            let units = (height - base_height) / height_inc;
+                            let pixels = units * height_inc;
+                            config.height = Some(base_height + pixels);
+                        }
+                    }
                     self.conn.configure_window(drag.window, &config)?.check()?;
                 }
                 PropertyNotify(ev) => {
-                    let window = ev.window;
-                    if ev.atom == self.atoms.wm_protocols {
-                        log::debug!("Updating WM_PROTOCOLS.");
-                        self.clients
-                            .get_mut(window)
-                            .state
-                            .as_mut()
-                            .unwrap()
-                            .wm_protocols = self.atoms.get_wm_protocols(&self.conn, window)?;
-                    } else if ev.atom == self.atoms.wm_state {
-                        log::debug!("Updating WM_STATE.");
-                        self.clients
-                            .get_mut(window)
-                            .state
-                            .as_mut()
-                            .unwrap()
-                            .wm_state = self.atoms.get_wm_state(&self.conn, window)?;
-                    } else if ev.atom == xproto::AtomEnum::WM_SIZE_HINTS.into() {
-                        log::debug!("Updating WM_SIZE_HINTS.");
-                        self.clients
-                            .get_mut(window)
-                            .state
-                            .as_mut()
-                            .unwrap()
-                            .wm_size_hints = self.atoms.get_wm_size_hints(&self.conn, window)?
-                    } else {
-                        log::warn!("Ignoring.");
+                    if let Err(err) = self.property_notify(ev) {
+                        log::warn!("{:?}", err);
                     }
                 }
                 UnmapNotify(ev) => {
@@ -511,6 +523,76 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
+    /// Dispatch on a CreateNotify event.
+    fn create_notify(&mut self, ev: xproto::CreateNotifyEvent) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        // TODO We should really factor all event handlers out into functions like this.
+        let window = ev.window;
+        self.clients.push(Client {
+            window,
+            state: if ev.override_redirect {
+                None
+            } else {
+                Some(ClientState {
+                    x: ev.x,
+                    y: ev.y,
+                    width: ev.width,
+                    height: ev.height,
+                    is_viewable: false,
+                    wm_protocols: self.atoms.get_wm_protocols(&self.conn, window)?,
+                    wm_state: Some(WmState {
+                        state: WmStateState::Withdrawn,
+                        icon: x11rb::NONE,
+                    }),
+                    wm_normal_hints: self.atoms.get_wm_normal_hints(&self.conn, window)?,
+                })
+            },
+        });
+        let client = self.clients.get(window);
+        if !ev.override_redirect {
+            self.manage(client)?;
+        }
+        Ok(())
+    }
+
+    /// Dispatch on a PropertyNotify event.
+    fn property_notify(&mut self, ev: xproto::PropertyNotifyEvent) -> Result<()>
+    where
+        Conn: Connection,
+    {
+        let window = ev.window;
+        if ev.atom == self.atoms.wm_protocols {
+            log::debug!("Updating WM_PROTOCOLS.");
+            self.clients
+                .get_mut(window)
+                .state
+                .as_mut()
+                .unwrap()
+                .wm_protocols = self.atoms.get_wm_protocols(&self.conn, window)?;
+        } else if ev.atom == self.atoms.wm_state {
+            log::debug!("Updating WM_STATE.");
+            self.clients
+                .get_mut(window)
+                .state
+                .as_mut()
+                .unwrap()
+                .wm_state = self.atoms.get_wm_state(&self.conn, window)?;
+        } else if ev.atom == xproto::AtomEnum::WM_NORMAL_HINTS.into() {
+            log::debug!("Updating WM_NORMAL_HINTS.");
+            self.clients
+                .get_mut(window)
+                .state
+                .as_mut()
+                .unwrap()
+                .wm_normal_hints = self.atoms.get_wm_normal_hints(&self.conn, window)?
+        } else {
+            log::warn!("Ignoring.");
+        }
+        Ok(())
+    }
+
     /// Focus a window.
     fn focus(&self, window: xproto::Window) -> Result<()>
     where
@@ -548,19 +630,43 @@ impl<Conn> OxWM<Conn> {
         Ok(())
     }
 
-    /// Begin managing a window.
-    fn manage(&self, window: xproto::Window) -> Result<()>
+    /// Begin managing a client.
+    fn manage(&self, client: &Client) -> Result<()>
     where
         Conn: Connection,
     {
-        let attrs = self.conn.get_window_attributes(window)?.reply()?;
+        let st = client.state.as_ref().unwrap();
+        // Enforce our size policies.
+        let (min_width, min_height) = st
+            .wm_normal_hints
+            .min_size
+            .unwrap_or((MIN_WIDTH as i32, MIN_HEIGHT as i32));
+        let (max_width, max_height) = st
+            .wm_normal_hints
+            .max_size
+            .unwrap_or((MAX_WIDTH as i32, MAX_HEIGHT as i32));
+        let mut value_list = xproto::ConfigureWindowAux::new()
+            .width(st.width as u32)
+            .height(st.height as u32);
+        value_list.width = value_list
+            .width
+            .map(|w| w.max(min_width as u32).min(max_width as u32));
+        value_list.height = value_list
+            .height
+            .map(|h| h.max(min_height as u32).min(max_height as u32));
+        self.conn
+            .configure_window(client.window, &value_list)?
+            .check()?;
+
+        // Do other stuff.
+        let attrs = self.conn.get_window_attributes(client.window)?.reply()?;
         let state = match attrs.map_state {
             xproto::MapState::VIEWABLE => WmStateState::Normal,
             _ => WmStateState::Withdrawn,
         };
         self.atoms.set_wm_state(
             &self.conn,
-            window,
+            client.window,
             WmState {
                 state,
                 icon: x11rb::NONE,
@@ -572,7 +678,7 @@ impl<Conn> OxWM<Conn> {
         self.conn
             .grab_button(
                 true,
-                window,
+                client.window,
                 event_mask_to_u16(xproto::EventMask::BUTTON_PRESS),
                 xproto::GrabMode::SYNC,
                 xproto::GrabMode::SYNC,
@@ -586,7 +692,7 @@ impl<Conn> OxWM<Conn> {
         self.conn
             .grab_button(
                 false,
-                window,
+                client.window,
                 event_mask_to_u16(
                     xproto::EventMask::BUTTON_PRESS
                         | xproto::EventMask::BUTTON_RELEASE
@@ -604,7 +710,7 @@ impl<Conn> OxWM<Conn> {
         self.conn
             .grab_button(
                 false,
-                window,
+                client.window,
                 event_mask_to_u16(
                     xproto::EventMask::BUTTON_PRESS
                         | xproto::EventMask::BUTTON_RELEASE
@@ -621,7 +727,7 @@ impl<Conn> OxWM<Conn> {
         // Set our desired event mask.
         self.conn
             .change_window_attributes(
-                window,
+                client.window,
                 &xproto::ChangeWindowAttributesAux::new().event_mask(
                     xproto::EventMask::ENTER_WINDOW
                         | xproto::EventMask::FOCUS_CHANGE

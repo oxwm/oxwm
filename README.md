@@ -44,10 +44,17 @@ OxWM is not (currently) a reparenting WM, so you'll need to use your "kill"
 binding to close windows. You can drag windows around with mod+left mouse, and
 you can resize windows with mod+right mouse.
 
+We don't have full ICCCM compliance, but we have at least partial support for
+all of the following:
+
+- WM_PROTOCOLS
+- WM_STATE
+- WM_SIZE_HINTS
+
 Note: we currently log every single event we receive, which can seriously impact
 performance (you'll probably notice it when dragging windows). You can probably
-improve performance by redirecting the log to `/dev/null`, or by just ignoring
-it.
+improve performance by redirecting the log to `/dev/null`, or by just letting it
+go to stdout.
 
 # Testing
 
@@ -59,9 +66,9 @@ undertaking.
 # Future directions
 
 In its current state, this is essentially a toy project, so there's lots of room
-for expansion. However, we're unsatisfied with the codebase: it's quite messy.
-We've spent a lot of time thinking about how to design better fundamental
-abstractions, and fixing things will probably require a rewrite. This is not a
-crazy suggestion, since we didn't know anything about the X protocol when we
-started; knowing much more now, it should be easier to create a sound design
-from the start.
+for expansion. However, we're unsatisfied with the codebase: it's quite messy
+and not very DRY. We've spent a lot of time thinking about how to design better
+fundamental abstractions, and fixing things will probably require a rewrite.
+This is not a crazy suggestion, since we didn't know anything about the X
+protocol when we started; knowing much more now, it should be easier to create a
+sound design from the start.
