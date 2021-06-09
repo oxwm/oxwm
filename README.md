@@ -1,6 +1,6 @@
 # Getting Started
 
-You'll want to have a file named `oxwm/config.toml` in your platform-specific
+You might want to have a file named `oxwm/config.toml` in your platform-specific
 configuration directory. For Linux, this is usually `~/.config/`. A sensible
 default config file might look like this:
 
@@ -21,8 +21,8 @@ tells OxWM that, with the modifier key pressed, pressing the `Escape` key should
 exit, and pressing `q` should immediately abort the process of the focused
 window.
 
-Note that, at the moment, if you don't have this config file, the program just
-won't run.
+If you don't create this config file, one will be generated for you at the
+appropriate location.
 
 After you've configured the program, you'll want to make your `~/.xinitrc` look
 something like this:
