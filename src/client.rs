@@ -246,7 +246,11 @@ impl Clients {
     }
 }
 
-/// Tests.
+/// Issue was encountered where `Clients` could retain the ID of a closed window in
+/// `Clients.focus`, despite having removed the corresponding window from the stack
+/// of managed windows. This caused an "unwrap None" error on removing the next window.
+/// Regression test to verify that `Clients.remove` properly updates `Clients.focus` when
+/// the focused window is removed.
 #[test]
 fn can_remove_focused_window() {
     let mut clients = Clients {
@@ -254,6 +258,7 @@ fn can_remove_focused_window() {
         focus: None,
     };
 
+    //Setup dummy clients in the absence of an X11 server
     clients.push(Client {
         window: 100,
         state: Some(ClientState {
@@ -312,17 +317,251 @@ fn can_remove_focused_window() {
 
     clients.set_focus(300);
     assert_eq!(clients.get_focus().unwrap().window, 300);
+    assert_eq!(clients.get_focus_mut().unwrap().window, 300);
 
     clients.remove(100);
     assert_eq!(clients.get_focus().unwrap().window, 300);
+    assert_eq!(clients.get_focus_mut().unwrap().window, 300);
 
     clients.remove(300);
     assert!(clients.get_focus().is_none());
+    assert!(clients.get_focus_mut().is_none());
 
     clients.set_focus(200);
     clients.remove(250);
     assert_eq!(clients.get_focus().unwrap().window, 200);
+    assert_eq!(clients.get_focus_mut().unwrap().window, 200);
 
     clients.remove(200);
     assert!(clients.get_focus().is_none());
+    assert!(clients.get_focus_mut().is_none());
+}
+
+/// Confirm that window stack positioning operations have correct behavior
+#[test]
+fn check_client_stacking() {
+    let mut clients = Clients {
+        stack: vec![],
+        focus: None,
+    };
+
+    //Setup dummy clients in the absence of an X11 server
+    clients.push(Client {
+        window: 100,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    clients.push(Client {
+        window: 150,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    clients.push(Client {
+        window: 200,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    clients.push(Client {
+        window: 250,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: false,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    clients.push(Client {
+        window: 300,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    //100,150,200,250,300
+    assert_eq!(clients.top().window, 300);
+    assert_eq!(clients.top_mut().window, 300);
+    assert_eq!(clients.has_client(300), true);
+    assert_eq!(clients.has_client(675), false);
+
+    clients.remove(300);
+    //100,150,200,250
+    assert_eq!(clients.top().window, 250);
+    assert_eq!(clients.top_mut().window, 250);
+    assert_eq!(clients.has_client(300), false);
+    assert_eq!(clients.has_client(675), false);
+
+    clients.move_to_above(100, 250);
+    //150,200,250,100
+    assert_eq!(clients.top().window, 100);
+    assert_eq!(clients.top_mut().window, 100);
+
+    clients.remove(100);
+    //150,200,250
+    assert_eq!(clients.top().window, 250);
+    assert_eq!(clients.top_mut().window, 250);
+
+    clients.move_to_top(150);
+    //200,250,150
+    assert_eq!(clients.top().window, 150);
+    assert_eq!(clients.top_mut().window, 150);
+
+    clients.move_to_bottom(250);
+    //250,200,150
+    {
+        let mut iter = clients.iter();
+        assert_eq!(iter.next().unwrap().window, 250);
+        assert_eq!(iter.next().unwrap().window, 200);
+        assert_eq!(iter.next().unwrap().window, 150);
+        assert!(iter.next().is_none())
+    }
+    assert_eq!(clients.top().window, 150);
+    assert_eq!(clients.top_mut().window, 150);
+
+    clients.move_to_above(150, 250);
+    //250,150,200
+    {
+        let mut iter = clients.iter();
+        assert_eq!(iter.next().unwrap().window, 250);
+        assert_eq!(iter.next().unwrap().window, 150);
+        assert_eq!(iter.next().unwrap().window, 200);
+        assert!(iter.next().is_none())
+    }
+
+    clients.move_to_above(150, 200);
+    //250,200,150
+    {
+        let mut iter = clients.iter();
+        assert_eq!(iter.next().unwrap().window, 250);
+        assert_eq!(iter.next().unwrap().window, 200);
+        assert_eq!(iter.next().unwrap().window, 150);
+        assert!(iter.next().is_none())
+    }
+
+    clients.move_to_above(250, 150);
+    //200,150,250?
+    {
+        let mut iter = clients.iter();
+        assert_eq!(iter.next().unwrap().window, 200);
+        assert_eq!(iter.next().unwrap().window, 150);
+        assert_eq!(iter.next().unwrap().window, 250);
+        assert!(iter.next().is_none())
+    }
+}
+
+/// Confirm that the get and get_mut functions retrieve the expected Client.
+#[test]
+fn check_get() {
+    let mut clients = Clients {
+        stack: vec![],
+        focus: None,
+    };
+
+    //Setup dummy clients in the absence of an X11 server
+    clients.push(Client {
+        window: 100,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    clients.push(Client {
+        window: 150,
+        state: Some(ClientState {
+            x: 1,
+            y: 1,
+            width: 10,
+            height: 10,
+            is_viewable: true,
+            wm_protocols: WmProtocols::new(),
+            wm_state: None,
+            wm_normal_hints: WmSizeHints::new(),
+        }),
+    });
+
+    assert_eq!(clients.get(100).window, 100);
+    assert_eq!(clients.get_mut(100).window, 100);
+    assert_eq!(clients.get(150).window, 150);
+    assert_eq!(clients.get_mut(150).window, 150);
+
+    // At this time it is an error to attempt an operation on a window ID that does
+    // not have a corresponding Client.
+    let panic_result = std::panic::catch_unwind(|| assert_eq!(clients.get(750).window, 150));
+    assert!(panic_result.is_err());
+
+    // Here `AssertUnwindSafe` is used to confirm that `Clients.get_mut()` will panic
+    // when passed a window ID for which it has no corresponding client. As this
+    // means a mutable borrow is transferred beyond an unwind boundary we cannot
+    // assure that `clients_unsafe` is in a good state after the panic so it should
+    // be dropped immediately.
+    {
+        let mut clients_unsafe = Clients {
+            stack: vec![],
+            focus: None,
+        };
+
+        //Setup dummy clients in the absence of an X11 server
+        clients_unsafe.push(Client {
+            window: 100,
+            state: Some(ClientState {
+                x: 1,
+                y: 1,
+                width: 10,
+                height: 10,
+                is_viewable: true,
+                wm_protocols: WmProtocols::new(),
+                wm_state: None,
+                wm_normal_hints: WmSizeHints::new(),
+            }),
+        });
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_eq!(clients_unsafe.get_mut(750).window, 150);
+        }));
+        assert!(panic_result.is_err());
+    }
 }

@@ -755,12 +755,20 @@ impl<Conn> OxWM<Conn> {
     // Actions go here. Note that, due to the need to conform to the Action
     // type, these functions' type signatures may sometimes seem odd.
 
-    /// Kill the currently-focused client.
+    /// Kill the currently moused-over client.
     fn kill_focused_client(&mut self, window: xproto::Window) -> Result<()>
     where
         Conn: Connection,
     {
-        self.kill(window)
+        //X11 server sends window id of the window underneath the mouse cursor in
+        //response to our bound keypress events. If the mouse is over the desktop
+        //background the id we receive is 0. Ignore attempts to kill non-existant
+        //windows.
+        if 0 != window {
+            self.kill(window)
+        } else {
+            Ok(())
+        }
     }
 
     /// Poison the window manager, causing it to die promptly.
