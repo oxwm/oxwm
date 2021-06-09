@@ -124,6 +124,7 @@ where
     modm.serialize(serializer)
 }
 
+/// An error indicating that we can't find the user's config directory.
 #[derive(
     PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash, Error, Deserialize, Serialize,
 )]
@@ -145,8 +146,8 @@ impl<Conn> Config<Conn> {
     where
         Conn: Connection,
     {
-        // TODO Will this work on Unix (e.g., BSD)? We should probably make sure
-        // it works on Unix.
+        // TODO Will this work on proper Unix (e.g., BSD)? We should probably
+        // make sure it works on Unix.
         let mut path = dirs::config_dir().ok_or(UnsupportedPlatformError)?;
         path.push("oxwm");
         path.push("config.toml");
